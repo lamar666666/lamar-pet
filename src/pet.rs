@@ -101,6 +101,7 @@ pub struct PetView {
     drag_grab: Option<(f32, f32)>,
     drag_moved: bool,
     shadow_cleared: bool,
+    last_name: String,
     direction: i32,
     frame: usize,
     scale: u16,
@@ -131,6 +132,7 @@ impl PetView {
             }
         })
         .detach();
+        let last_name = client.snapshot().preferences.name.clone();
         Self {
             metrics,
             client,
@@ -145,6 +147,7 @@ impl PetView {
             drag_grab: None,
             drag_moved: false,
             shadow_cleared: false,
+            last_name,
             direction: 0,
             frame: 0,
             scale: 100,
@@ -234,6 +237,10 @@ impl Render for PetView {
         }
         crate::ui::sync_theme(self.client.snapshot().preferences.appearance, window, cx);
         let snapshot = self.client.snapshot();
+        if snapshot.preferences.name != self.last_name {
+            window.set_window_title(&format!("{} · 桌宠", snapshot.preferences.name));
+            self.last_name = snapshot.preferences.name.clone();
+        }
         let scale = snapshot.preferences.scale_percent;
         let side = 180.0 * f32::from(scale) / 100.0;
         if scale != self.scale {

@@ -285,7 +285,8 @@ fn show_panel(cx: &mut App) -> Result<(), String> {
             },
             move |window, cx| {
                 ui::sync_theme(client.snapshot().preferences.appearance, window, cx);
-                let view = cx.new(|cx| ui::MainView::new(client, atlas, metrics, data_dir, cx));
+                let view =
+                    cx.new(|cx| ui::MainView::new(client, atlas, metrics, data_dir, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -335,7 +336,10 @@ fn show_pet(cx: &mut App) -> Result<(), String> {
                 ..Default::default()
             },
             move |window, cx| {
-                window.set_window_title("Lamar Pet · 桌宠");
+                window.set_window_title(&format!(
+                    "{} · 桌宠",
+                    client.snapshot().preferences.name
+                ));
                 let callback = Rc::new(|cx: &mut App| {
                     let _ = show_panel(cx);
                 });

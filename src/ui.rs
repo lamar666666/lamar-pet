@@ -1,8 +1,9 @@
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Theme, ThemeMode,
     button::{Button, ButtonVariants},
+    input::{Input, InputEvent, InputState},
 };
-use gpui_kit::{App, Context, Render, Window, div, img, prelude::*, px};
+use gpui_kit::{App, Context, Entity, Render, Window, div, img, prelude::*, px};
 use lamar_pet::{
     focus::{FocusCommand, FocusPhase, FocusReminder},
     service::{AppSnapshot, Appearance, Client, Command},
@@ -16,6 +17,11 @@ pub struct MainView {
     client: Client,
     atlas: Rc<SpriteAtlas>,
     data_dir: Rc<std::path::Path>,
+    name_input: Entity<InputState>,
+    focus_input: Entity<InputState>,
+    break_input: Entity<InputState>,
+    editing_minutes: bool,
+    last_name: String,
     snapshot: AppSnapshot,
     send_error: bool,
     pending: Option<u64>,
@@ -41,9 +47,43 @@ impl MainView {
         atlas: Rc<SpriteAtlas>,
         metrics: Arc<crate::metrics::Metrics>,
         data_dir: Rc<std::path::Path>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let snapshot = client.snapshot();
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("宠物名")
+                .default_value(snapshot.preferences.name.clone())
+        });
+        let focus_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(snapshot.focus.focus_minutes.to_string())
+        });
+        let break_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(snapshot.focus.break_minutes.to_string())
+        });
+        cx.subscribe(&name_input, |view, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                let name = state.read(cx).value().trim().to_string();
+                if !name.is_empty() && name != view.snapshot.preferences.name {
+                    view.send(Command::SetName(name), cx);
+                }
+            }
+        })
+        .detach();
+        for input in [&focus_input, &break_input] {
+            cx.subscribe(input, |view, _, event: &InputEvent, cx| {
+                match event {
+                    InputEvent::Focus => view.editing_minutes = true,
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        view.editing_minutes = false;
+                        view.apply_minutes(cx);
+                    }
+                    _ => {}
+                }
+            })
+            .detach();
+        }
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             loop {
@@ -71,11 +111,42 @@ impl MainView {
             client,
             atlas,
             data_dir,
+            name_input,
+            focus_input,
+            break_input,
+            editing_minutes: false,
+            last_name: snapshot.preferences.name.clone(),
             snapshot,
             send_error: false,
             pending: None,
         }
     }
+
+    /// Minutes typed directly apply on Enter/blur; the focused box is left
+    /// alone until then so keystrokes are never clobbered by the 150ms sync.
+    fn apply_minutes(&mut self, cx: &mut Context<Self>) {
+        let focus = &self.snapshot.focus;
+        let parse = |input: &Entity<InputState>, fallback: u16, cx: &App| {
+            input
+                .read(cx)
+                .value()
+                .trim()
+                .parse::<u16>()
+                .unwrap_or(fallback)
+        };
+        let focus_minutes = parse(&self.focus_input, focus.focus_minutes, cx).clamp(1, 180);
+        let break_minutes = parse(&self.break_input, focus.break_minutes, cx).clamp(1, 60);
+        if focus_minutes != focus.focus_minutes || break_minutes != focus.break_minutes {
+            self.send(
+                Command::Focus(FocusCommand::Configure {
+                    focus_minutes,
+                    break_minutes,
+                }),
+                cx,
+            );
+        }
+    }
+
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if self.pending.is_some() {
             return;
@@ -95,6 +166,30 @@ impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.metrics.panel_frames.fetch_add(1, Ordering::Relaxed);
         sync_theme(self.snapshot.preferences.appearance, window, cx);
+        let name = self.snapshot.preferences.name.clone();
+        if name != self.last_name {
+            window.set_window_title(&name);
+            self.last_name = name;
+        }
+        if !self.editing_minutes {
+            let want = [
+                (
+                    self.focus_input.clone(),
+                    self.snapshot.focus.focus_minutes.to_string(),
+                ),
+                (
+                    self.break_input.clone(),
+                    self.snapshot.focus.break_minutes.to_string(),
+                ),
+            ];
+            for (input, value) in want {
+                input.update(cx, |state, cx| {
+                    if state.value() != value {
+                        state.set_value(value, window, cx);
+                    }
+                });
+            }
+        }
         let focus = &self.snapshot.focus;
         let idle = focus.phase == FocusPhase::Idle;
         let blocked = self.snapshot.load_pending || self.pending.is_some();
@@ -134,7 +229,7 @@ impl Render for MainView {
                                 div()
                                     .text_2xl()
                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child("Lamar Pet"),
+                                    .child(self.snapshot.preferences.name.clone()),
                             )
                             .child(
                                 div()
@@ -256,6 +351,11 @@ impl Render for MainView {
             };
             let less = configure(false);
             let more = configure(true);
+            let input = if is_focus {
+                self.focus_input.clone()
+            } else {
+                self.break_input.clone()
+            };
             content = content.child(
                 div()
                     .flex()
@@ -270,7 +370,17 @@ impl Render for MainView {
                                 cx.listener(move |view, _, _, cx| view.send(less.clone(), cx)),
                             ),
                     )
-                    .child(format!("{} 分钟", value))
+                    .child(
+                        Input::new(&input)
+                            .w(px(64.0))
+                            .disabled(blocked || !idle),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("分钟"),
+                    )
                     .child(
                         Button::new(if is_focus { "focus-more" } else { "break-more" })
                             .label("+")
@@ -361,6 +471,18 @@ impl Render for MainView {
         }
         let data_dir = self.data_dir.clone();
         content
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().child("宠物名"))
+                    .child(
+                        Input::new(&self.name_input)
+                            .w(px(180.0))
+                            .disabled(blocked),
+                    ),
+            )
             .child(
                 div()
                     .flex()

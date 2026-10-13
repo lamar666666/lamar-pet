@@ -53,6 +53,7 @@ impl Tray {
     }
 
     pub fn update(&self, snapshot: &AppSnapshot) {
+        let _ = self._icon.set_tooltip(Some(&snapshot.preferences.name));
         self.toggle.set_text(match snapshot.focus.phase {
             FocusPhase::Idle => "开始专注",
             FocusPhase::Focus => "暂停专注",

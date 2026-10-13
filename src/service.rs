@@ -27,6 +27,7 @@ pub enum Appearance {
 pub struct Preferences {
     pub scale_percent: u16,
     pub appearance: Appearance,
+    pub name: String,
 }
 
 impl Default for Preferences {
@@ -34,6 +35,7 @@ impl Default for Preferences {
         Self {
             scale_percent: 100,
             appearance: Appearance::Light,
+            name: "Lamar Pet".into(),
         }
     }
 }
@@ -41,6 +43,8 @@ impl Default for Preferences {
 impl Preferences {
     pub fn is_valid(&self) -> bool {
         (50..=200).contains(&self.scale_percent)
+            && !self.name.trim().is_empty()
+            && self.name.chars().count() <= 24
     }
 }
 
@@ -49,6 +53,7 @@ pub enum Command {
     Focus(FocusCommand),
     SetScale(u16),
     SetAppearance(Appearance),
+    SetName(String),
     Shutdown,
 }
 
@@ -155,6 +160,14 @@ impl Machine {
             Command::SetScale(_) => Err("Pet scale must be between 50 and 200 percent".into()),
             Command::SetAppearance(appearance) => {
                 self.preferences.appearance = appearance;
+                Ok(())
+            }
+            Command::SetName(name) => {
+                let name = name.trim();
+                if name.is_empty() || name.chars().count() > 24 {
+                    return Err("Pet name must be 1-24 characters".into());
+                }
+                self.preferences.name = name.into();
                 Ok(())
             }
             Command::Shutdown => Ok(()),
