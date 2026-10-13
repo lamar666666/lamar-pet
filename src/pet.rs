@@ -26,6 +26,35 @@ fn cursor_position(window: &Window) -> Option<(f32, f32)> {
     ))
 }
 
+/// Tool/popup windows still pick up a DWM drop shadow on Windows 11; the pet
+/// needs to sit flat on the wallpaper, so non-client rendering is disabled.
+#[cfg(windows)]
+fn clear_window_shadow(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::HWND,
+        Graphics::Dwm::{DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute},
+    };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(raw.hwnd.get() as *mut core::ffi::c_void);
+    let policy = DWMNCRP_DISABLED;
+    // SAFETY: hwnd is this window's own handle and the policy pointer is a
+    // valid u32 for the duration of the call.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const _ as *const _,
+            std::mem::size_of_val(&policy) as u32,
+        );
+    }
+}
+
 #[cfg(windows)]
 fn move_window(window: &Window, x: f32, y: f32) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -71,6 +100,7 @@ pub struct PetView {
     last_mouse: Option<(i32, i32)>,
     drag_grab: Option<(f32, f32)>,
     drag_moved: bool,
+    shadow_cleared: bool,
     direction: i32,
     frame: usize,
     scale: u16,
@@ -114,6 +144,7 @@ impl PetView {
             last_mouse: None,
             drag_grab: None,
             drag_moved: false,
+            shadow_cleared: false,
             direction: 0,
             frame: 0,
             scale: 100,
@@ -196,6 +227,11 @@ impl Render for PetView {
         self.metrics
             .pet_frames
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !self.shadow_cleared {
+            self.shadow_cleared = true;
+            #[cfg(windows)]
+            clear_window_shadow(window);
+        }
         crate::ui::sync_theme(self.client.snapshot().preferences.appearance, window, cx);
         let snapshot = self.client.snapshot();
         let scale = snapshot.preferences.scale_percent;
