@@ -16,7 +16,13 @@ jobs:
         run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
       - name: Check source
         shell: pwsh
-        run: ./scripts/check.ps1
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build Windows executable
         shell: pwsh
         run: cargo build --locked --release

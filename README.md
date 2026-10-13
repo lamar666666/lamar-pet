@@ -16,6 +16,10 @@
 
 数据保存在本机，不需要账户或云服务。键鼠采样仅用于动画，不保存按键序列。检测到锁屏或休眠会暂停计时，重启后也恢复为暂停状态。
 
+## 下载
+
+[下载 Windows x64 EXE](https://github.com/lamar666666/lamar-pet/releases/latest/download/lamar-pet.exe)，双击即可运行。
+
 ## 运行与构建
 
 当前支持 Windows x64。源码使用 Rust 1.97.1 和 GPUI Kit。
@@ -38,15 +42,6 @@ cargo build --locked --release
 `focus.json` 保存设置、会话和统计，`focus.json.bak` 保留上一份有效文件。状态切换、正常退出及运行期间每 15 秒保存。异常退出可能损失最近 15 秒。
 
 遇到读取失败、损坏文件或不支持的数据版本时，程序停止覆盖并重试。修复前请先备份原文件；可用备份替换损坏的 `focus.json`。保存失败时保留现有文件并显示提示。
-
-## 验证
-
-```powershell
-./scripts/check.ps1
-./scripts/smoke.ps1 -Executable ./target/release/lamar-pet.exe
-```
-
-自动检查覆盖计时状态、暂停恢复、午夜归档、写入失败、退出保存、指令确认和透明精灵帧。Windows smoke 使用独立数据目录，检查窗口渲染与计时结束提醒。
 
 ## 来源与许可
 
