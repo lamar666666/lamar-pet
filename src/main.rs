@@ -31,6 +31,7 @@ use std::{
 struct Owner {
     metrics: Arc<metrics::Metrics>,
     _instance: File,
+    root: PathBuf,
     worker: Option<Worker>,
     client: Client,
     atlas: Rc<SpriteAtlas>,
@@ -78,6 +79,7 @@ fn run() -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     }
     let report_root = root.clone();
+    let owner_root = root.clone();
     let worker = Worker::start(root)?;
     let client = worker.client();
     let report_client = client.clone();
@@ -107,6 +109,7 @@ fn run() -> Result<(), String> {
             cx.set_global(Owner {
                 metrics: metrics.clone(),
                 _instance: instance,
+                root: owner_root,
                 worker: Some(worker),
                 client: client.clone(),
                 atlas,
@@ -141,6 +144,7 @@ fn run() -> Result<(), String> {
             let executor = cx.background_executor().clone();
             cx.spawn(async move |cx| {
                 let mut last_reminder = None;
+                let mut last_phase: Option<FocusPhase> = None;
                 let mut resumed = false;
                 loop {
                     executor.timer(Duration::from_millis(100)).await;
@@ -191,6 +195,20 @@ fn run() -> Result<(), String> {
                             }
                         }
                         last_reminder = Some(snapshot.focus.reminder_sequence);
+                        if snapshot.focus.phase == FocusPhase::Focus
+                            && last_phase == Some(FocusPhase::Idle)
+                        {
+                            let minutes = snapshot.focus.focus_minutes;
+                            let _ = cx.update(|cx| {
+                                show_hint(
+                                    format!(
+                                        "专注 {minutes} 分钟开始，猫猫陪你。右键桌宠可以暂停。"
+                                    ),
+                                    cx,
+                                )
+                            });
+                        }
+                        last_phase = Some(snapshot.focus.phase);
                     }
                 }
             })
@@ -243,6 +261,7 @@ fn show_panel(cx: &mut App) -> Result<(), String> {
     let client = owner.client.clone();
     let atlas = owner.atlas.clone();
     let metrics = owner.metrics.clone();
+    let data_dir: Rc<std::path::Path> = owner.root.as_path().into();
     let height = cx
         .primary_display()
         .map(|display| (f32::from(display.bounds().size.height) - 100.0).clamp(580.0, 750.0))
@@ -266,7 +285,7 @@ fn show_panel(cx: &mut App) -> Result<(), String> {
             },
             move |window, cx| {
                 ui::sync_theme(client.snapshot().preferences.appearance, window, cx);
-                let view = cx.new(|cx| ui::MainView::new(client, atlas, metrics, cx));
+                let view = cx.new(|cx| ui::MainView::new(client, atlas, metrics, data_dir, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -351,12 +370,57 @@ fn show_reminder(reminder: FocusReminder, cx: &mut App) -> Result<(), String> {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|_| ui::ReminderView { reminder, metrics });
+                let view = cx.new(|_| ui::ReminderView::reminder(reminder, metrics));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
         .map_err(|error| error.to_string())?;
     cx.global_mut::<Owner>().reminder = Some(handle);
+    Ok(())
+}
+
+/// Transient toast shown when a focus round begins; dismisses itself.
+fn show_hint(message: String, cx: &mut App) -> Result<(), String> {
+    let metrics = cx.global::<Owner>().metrics.clone();
+    if let Some(handle) = cx.global_mut::<Owner>().reminder.take() {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
+    let handle = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(360.0), px(150.0)),
+                    cx,
+                ))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Lamar Pet".into()),
+                    ..Default::default()
+                }),
+                show: true,
+                focus: false,
+                is_resizable: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                let view = cx.new(|_| ui::ReminderView {
+                    message: message.into(),
+                    metrics,
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    cx.global_mut::<Owner>().reminder = Some(handle);
+    let closer = cx.global::<Owner>().reminder;
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        executor.timer(Duration::from_secs(5)).await;
+        if let Some(closer) = closer {
+            let _ = closer.update(cx, |_, window, _| window.remove_window());
+        }
+    })
+    .detach();
     Ok(())
 }
 

@@ -1,11 +1,62 @@
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::{App, Context, Image, MouseButton, Render, Window, div, img, prelude::*, px, size};
+use gpui_kit::{
+    App, Context, Image, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Window,
+    div, img, prelude::*, px, rgba, size,
+};
 use lamar_pet::{focus::FocusPhase, service::Client, sprites::SpriteAtlas};
 use std::{
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
+
+/// gpui's `Window::start_window_move` is a no-op on Windows, so the pet
+/// drags itself: remember where the cursor grabbed the window, then apply
+/// `SetWindowPos` while the button stays down.
+#[cfg(windows)]
+fn cursor_position(window: &Window) -> Option<(f32, f32)> {
+    use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+    let mut cursor = POINT::default();
+    // SAFETY: the point buffer is valid for the duration of this call.
+    unsafe { GetCursorPos(&mut cursor) }.ok()?;
+    let scale = f64::from(window.scale_factor());
+    Some((
+        (f64::from(cursor.x) / scale) as f32,
+        (f64::from(cursor.y) / scale) as f32,
+    ))
+}
+
+#[cfg(windows)]
+fn move_window(window: &Window, x: f32, y: f32) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos},
+    };
+    // `Window::window_handle` is an inherent gpui method; disambiguate to the
+    // raw-window-handle trait to reach the OS-level HWND.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(raw.hwnd.get() as *mut core::ffi::c_void);
+    let scale = window.scale_factor();
+    // SAFETY: hwnd comes from this process's own live window; the call only
+    // repositions it without touching size, z-order or activation.
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            (x * scale) as i32,
+            (y * scale) as i32,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
+}
 
 pub struct PetView {
     metrics: Arc<crate::metrics::Metrics>,
@@ -18,6 +69,8 @@ pub struct PetView {
     last_activity: u64,
     last_reminder: Option<u64>,
     last_mouse: Option<(i32, i32)>,
+    drag_grab: Option<(f32, f32)>,
+    drag_moved: bool,
     direction: i32,
     frame: usize,
     scale: u16,
@@ -59,6 +112,8 @@ impl PetView {
             last_activity: 0,
             last_reminder: None,
             last_mouse: None,
+            drag_grab: None,
+            drag_moved: false,
             direction: 0,
             frame: 0,
             scale: 100,
@@ -111,6 +166,29 @@ impl PetView {
             2
         };
     }
+
+    /// Released without moving counts as a pat: the cat celebrates briefly.
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag_grab.is_some() && !self.drag_moved {
+            self.celebrate_until = Instant::now() + Duration::from_millis(800);
+        }
+        self.drag_grab = None;
+        self.drag_moved = false;
+        cx.notify();
+    }
+
+    #[cfg(windows)]
+    fn follow_drag(&mut self, window: &mut Window) {
+        if let Some((grab_x, grab_y)) = self.drag_grab
+            && let Some((x, y)) = cursor_position(window)
+        {
+            self.drag_moved = true;
+            move_window(window, x - grab_x, y - grab_y);
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn follow_drag(&mut self, _window: &mut Window) {}
 }
 
 impl Render for PetView {
@@ -148,9 +226,54 @@ impl Render for PetView {
             .flex_col()
             .items_center()
             .size_full()
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, window, _| {
+                    view.drag_moved = false;
+                    #[cfg(windows)]
+                    {
+                        view.drag_grab = cursor_position(window).map(|(x, y)| {
+                            let origin = window.bounds().origin;
+                            (x - f32::from(origin.x), y - f32::from(origin.y))
+                        });
+                    }
+                    #[cfg(not(windows))]
+                    window.start_window_move();
+                }),
+            )
+            .on_mouse_move(cx.listener(|view, _: &MouseMoveEvent, window, _| {
+                view.follow_drag(window);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseUpEvent, _, cx| view.end_drag(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseUpEvent, _, cx| view.end_drag(cx)),
+            )
             .on_mouse_down(MouseButton::Right, move |_, _, cx| open_panel(cx))
-            .child(img(image).w(px(side)).h(px(side)))
+            .child(
+                div()
+                    .relative()
+                    .w(px(side))
+                    .h(px(side))
+                    // A soft dark disc keeps the sprite readable over any
+                    // wallpaper, light or dark.
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(side * 0.06))
+                            .left(px(side * 0.06))
+                            .w(px(side * 0.88))
+                            .h(px(side * 0.88))
+                            .rounded_full()
+                            .bg(rgba(0x10141c59))
+                            .border_1()
+                            .border_color(rgba(0xffffff24)),
+                    )
+                    .child(img(image).w(px(side)).h(px(side))),
+            )
             .child(
                 div()
                     .rounded_full()

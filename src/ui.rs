@@ -15,6 +15,7 @@ pub struct MainView {
     metrics: Arc<crate::metrics::Metrics>,
     client: Client,
     atlas: Rc<SpriteAtlas>,
+    data_dir: Rc<std::path::Path>,
     snapshot: AppSnapshot,
     send_error: bool,
     pending: Option<u64>,
@@ -39,6 +40,7 @@ impl MainView {
         client: Client,
         atlas: Rc<SpriteAtlas>,
         metrics: Arc<crate::metrics::Metrics>,
+        data_dir: Rc<std::path::Path>,
         cx: &mut Context<Self>,
     ) -> Self {
         let snapshot = client.snapshot();
@@ -68,6 +70,7 @@ impl MainView {
             metrics,
             client,
             atlas,
+            data_dir,
             snapshot,
             send_error: false,
             pending: None,
@@ -356,27 +359,68 @@ impl Render for MainView {
                     .child(message),
             );
         }
-        content.child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("左键拖动桌宠，右键打开面板。数据仅保存在本机。"),
-        )
+        let data_dir = self.data_dir.clone();
+        content
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child("数据目录"))
+                    .child(
+                        Button::new("open-data-dir").label("打开").on_click(
+                            move |_, _, cx| open_data_dir(&data_dir, cx),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.data_dir.display().to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("左键拖动桌宠，点一下它会高兴，右键打开面板。"),
+            )
+    }
+}
+
+#[cfg(windows)]
+fn open_data_dir(dir: &std::path::Path, _: &mut App) {
+    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+}
+
+#[cfg(not(windows))]
+fn open_data_dir(dir: &std::path::Path, cx: &mut App) {
+    if let Some(text) = dir.to_str() {
+        cx.open_url(&format!("file://{text}"));
     }
 }
 
 pub struct ReminderView {
-    pub reminder: FocusReminder,
+    pub message: std::borrow::Cow<'static, str>,
     pub metrics: Arc<crate::metrics::Metrics>,
 }
-impl Render for ReminderView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.metrics.reminder_frames.fetch_add(1, Ordering::Relaxed);
-        let message = if self.reminder == FocusReminder::FocusCompleted {
+impl ReminderView {
+    pub fn reminder(reminder: FocusReminder, metrics: Arc<crate::metrics::Metrics>) -> Self {
+        let message = if reminder == FocusReminder::FocusCompleted {
             "本轮专注已完成，休息一下。"
         } else {
             "休息结束，准备好再开始下一轮。"
         };
+        Self {
+            message: message.into(),
+            metrics,
+        }
+    }
+}
+impl Render for ReminderView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.metrics.reminder_frames.fetch_add(1, Ordering::Relaxed);
+        let message = self.message.clone();
         div()
             .flex()
             .flex_col()
@@ -385,7 +429,7 @@ impl Render for ReminderView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(div().text_lg().child(message))
+            .child(div().text_lg().child(message.into_owned()))
             .child(
                 Button::new("dismiss")
                     .label("知道了")
