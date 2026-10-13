@@ -24,21 +24,29 @@ fn main() {
 1 VERSIONINFO
 FILEVERSION 0,1,0,0
 PRODUCTVERSION 0,1,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
 BEGIN
  BLOCK "StringFileInfo"
  BEGIN
-  BLOCK "040904B0"
+  BLOCK "040904E4"
   BEGIN
    VALUE "FileDescription", "Lamar Pet\0"
    VALUE "ProductName", "Lamar Pet\0"
    VALUE "ProductVersion", "0.1.0\0"
+   VALUE "FileVersion", "0.1.0.0\0"
+   VALUE "InternalName", "lamar-pet\0"
+   VALUE "CompanyName", "lamar\0"
    VALUE "OriginalFilename", "lamar-pet.exe\0"
    VALUE "LegalCopyright", "Copyright (c) 2026 lamar\0"
   END
  END
  BLOCK "VarFileInfo"
  BEGIN
-  VALUE "Translation", 0x0409, 1200
+  VALUE "Translation", 0x0409, 1252
  END
 END
 "#,
