@@ -5,7 +5,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{App, Context, Entity, Render, Window, div, img, prelude::*, px};
 use lamar_pet::{
-    focus::{FocusCommand, FocusPhase, FocusReminder},
+    focus::{FocusCheckpoint, FocusCommand, FocusPhase, FocusReminder},
     service::{AppSnapshot, Appearance, Client, Command},
     sprites::SpriteAtlas,
 };
@@ -20,6 +20,7 @@ pub struct MainView {
     name_input: Entity<InputState>,
     focus_input: Entity<InputState>,
     break_input: Entity<InputState>,
+    standup_input: Entity<InputState>,
     editing_minutes: bool,
     last_name: String,
     snapshot: AppSnapshot,
@@ -62,6 +63,21 @@ impl MainView {
         let break_input = cx.new(|cx| {
             InputState::new(window, cx).default_value(snapshot.focus.break_minutes.to_string())
         });
+        let standup_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(snapshot.preferences.standup_minutes.to_string())
+        });
+        cx.subscribe(&standup_input, |view, _, event: &InputEvent, cx| {
+            match event {
+                InputEvent::Focus => view.editing_minutes = true,
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    view.editing_minutes = false;
+                    view.apply_standup(cx);
+                }
+                _ => {}
+            }
+        })
+        .detach();
         cx.subscribe(&name_input, |view, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                 let name = state.read(cx).value().trim().to_string();
@@ -114,6 +130,7 @@ impl MainView {
             name_input,
             focus_input,
             break_input,
+            standup_input,
             editing_minutes: false,
             last_name: snapshot.preferences.name.clone(),
             snapshot,
@@ -144,6 +161,20 @@ impl MainView {
                 }),
                 cx,
             );
+        }
+    }
+
+    fn apply_standup(&mut self, cx: &mut Context<Self>) {
+        let minutes = self
+            .standup_input
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u16>()
+            .unwrap_or(self.snapshot.preferences.standup_minutes)
+            .min(180);
+        if minutes != self.snapshot.preferences.standup_minutes {
+            self.send(Command::SetStandup(minutes), cx);
         }
     }
 
@@ -180,6 +211,10 @@ impl Render for MainView {
                 (
                     self.break_input.clone(),
                     self.snapshot.focus.break_minutes.to_string(),
+                ),
+                (
+                    self.standup_input.clone(),
+                    self.snapshot.preferences.standup_minutes.to_string(),
                 ),
             ];
             for (input, value) in want {
@@ -331,7 +366,8 @@ impl Render for MainView {
                                     .child(focus.today_completed_rounds.to_string()),
                             ),
                     ),
-            );
+            )
+            .child(week_strip(&focus.checkpoint, cx));
         let focus_minutes = focus.focus_minutes;
         let break_minutes = focus.break_minutes;
         for (is_focus, value, label, maximum) in [
@@ -392,6 +428,7 @@ impl Render for MainView {
             );
         }
         let appearance = self.snapshot.preferences.appearance;
+        let auto_continue = self.snapshot.preferences.auto_continue;
         let mut themes = div()
             .flex()
             .items_center()
@@ -469,6 +506,46 @@ impl Render for MainView {
                     .child(message),
             );
         }
+        content = content
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().child("久坐提醒"))
+                    .child(Input::new(&self.standup_input).w(px(64.0)).disabled(blocked))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("分钟，0 关闭"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child("自动连转"))
+                    .child(
+                        Button::new("auto-on")
+                            .label("开启")
+                            .selected(auto_continue)
+                            .disabled(blocked)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.send(Command::SetAutoContinue(true), cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("auto-off")
+                            .label("关闭")
+                            .selected(!auto_continue)
+                            .disabled(blocked)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.send(Command::SetAutoContinue(false), cx)
+                            })),
+                    ),
+            );
         let data_dir = self.data_dir.clone();
         content
             .child(
@@ -522,16 +599,122 @@ fn open_data_dir(dir: &std::path::Path, cx: &mut App) {
     }
 }
 
+/// Seven-day strip of focus minutes ending today; today's bar is highlighted.
+fn week_strip(
+    checkpoint: &FocusCheckpoint,
+    cx: &mut Context<MainView>,
+) -> impl IntoElement {
+    let muted = cx.theme().muted_foreground;
+    let border = cx.theme().border;
+    let primary = cx.theme().primary;
+    if checkpoint.calendar_day.len() < 10 {
+        return div();
+    }
+    let mut days = Vec::with_capacity(7);
+    let mut day = checkpoint.calendar_day.clone();
+    for _ in 0..7 {
+        days.push(day.clone());
+        day = prev_day(&day);
+    }
+    days.reverse();
+    let maximum = days
+        .iter()
+        .map(|day| {
+            checkpoint
+                .history
+                .iter()
+                .find(|entry| entry.day == *day)
+                .map_or(0, |entry| entry.focus_millis / 60_000)
+        })
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut strip = div().flex().items_end().gap_2().h(px(92.0));
+    for (index, day) in days.iter().enumerate() {
+        let minutes = checkpoint
+            .history
+            .iter()
+            .find(|entry| entry.day == *day)
+            .map_or(0, |entry| entry.focus_millis / 60_000);
+        let today = index == 6;
+        let height = if minutes == 0 {
+            3.0
+        } else {
+            8.0 + (minutes as f32 / maximum as f32) * 52.0
+        };
+        strip = strip.child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .h_full()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .h(px(16.0))
+                        .child(if minutes == 0 {
+                            "".into()
+                        } else {
+                            minutes.to_string()
+                        }),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(height))
+                        .rounded_sm()
+                        .bg(if today { primary } else { muted }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(if today { "今天".to_string() } else { day[5..].to_string() }),
+                ),
+        );
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(border)
+        .child(div().text_sm().text_color(muted).child("本周专注（分钟）"))
+        .child(strip)
+}
+
+fn prev_day(day: &str) -> String {
+    let year: i32 = day[..4].parse().unwrap_or(0);
+    let month: u32 = day[5..7].parse().unwrap_or(1);
+    let date: u32 = day[8..].parse().unwrap_or(1);
+    if date > 1 {
+        return format!("{year:04}-{month:02}-{:02}", date - 1);
+    }
+    let (year, month) = if month > 1 { (year, month - 1) } else { (year - 1, 12) };
+    let days = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    format!("{year:04}-{month:02}-{days:02}")
+}
+
 pub struct ReminderView {
     pub message: std::borrow::Cow<'static, str>,
     pub metrics: Arc<crate::metrics::Metrics>,
 }
 impl ReminderView {
     pub fn reminder(reminder: FocusReminder, metrics: Arc<crate::metrics::Metrics>) -> Self {
-        let message = if reminder == FocusReminder::FocusCompleted {
-            "本轮专注已完成，休息一下。"
-        } else {
-            "休息结束，准备好再开始下一轮。"
+        let message = match reminder {
+            FocusReminder::FocusCompleted => "本轮专注已完成，休息一下。",
+            FocusReminder::Standup => "坐太久啦，起来活动几分钟、喝点水。",
+            _ => "休息结束，准备好再开始下一轮。",
         };
         Self {
             message: message.into(),

@@ -145,6 +145,7 @@ fn run() -> Result<(), String> {
             cx.spawn(async move |cx| {
                 let mut last_reminder = None;
                 let mut last_phase: Option<FocusPhase> = None;
+                let mut last_standup: Option<u64> = None;
                 let mut resumed = false;
                 loop {
                     executor.timer(Duration::from_millis(100)).await;
@@ -195,6 +196,14 @@ fn run() -> Result<(), String> {
                             }
                         }
                         last_reminder = Some(snapshot.focus.reminder_sequence);
+                        if last_standup.is_some_and(|seen| seen != snapshot.standup_sequence)
+                            && snapshot.standup_sequence > 0
+                        {
+                            let _ = cx.update(|cx| {
+                                show_reminder(lamar_pet::focus::FocusReminder::Standup, cx)
+                            });
+                        }
+                        last_standup = Some(snapshot.standup_sequence);
                         if snapshot.focus.phase == FocusPhase::Focus
                             && last_phase == Some(FocusPhase::Idle)
                         {

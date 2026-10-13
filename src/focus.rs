@@ -20,6 +20,8 @@ pub enum FocusReminder {
     None,
     FocusCompleted,
     BreakCompleted,
+    /// Stand-up nudge from the machine-level idle timer, not a focus event.
+    Standup,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -28,6 +28,10 @@ pub struct Preferences {
     pub scale_percent: u16,
     pub appearance: Appearance,
     pub name: String,
+    /// Stand-up reminder interval in minutes; 0 disables it.
+    pub standup_minutes: u16,
+    /// Start the next focus round automatically when a break ends.
+    pub auto_continue: bool,
 }
 
 impl Default for Preferences {
@@ -36,6 +40,8 @@ impl Default for Preferences {
             scale_percent: 100,
             appearance: Appearance::Light,
             name: "Lamar Pet".into(),
+            standup_minutes: 45,
+            auto_continue: false,
         }
     }
 }
@@ -45,6 +51,7 @@ impl Preferences {
         (50..=200).contains(&self.scale_percent)
             && !self.name.trim().is_empty()
             && self.name.chars().count() <= 24
+            && self.standup_minutes <= 180
     }
 }
 
@@ -54,6 +61,8 @@ pub enum Command {
     SetScale(u16),
     SetAppearance(Appearance),
     SetName(String),
+    SetStandup(u16),
+    SetAutoContinue(bool),
     Shutdown,
 }
 
@@ -66,6 +75,8 @@ pub struct AppSnapshot {
     pub command_error: Option<String>,
     pub activity_pulse: u64,
     pub mouse: Option<(i32, i32)>,
+    /// Bumped each time the stand-up reminder fires; session-scoped.
+    pub standup_sequence: u64,
     pub revision: u64,
     pub last_ack: u64,
 }
@@ -77,6 +88,11 @@ struct Machine {
     load_pending: bool,
     command_error: Option<String>,
     last_observed: Option<Duration>,
+    last_step: Option<Duration>,
+    last_phase: Option<crate::focus::FocusPhase>,
+    last_reminder_sequence: u64,
+    standup_elapsed: Duration,
+    standup_sequence: u64,
     desktop_available: bool,
     activity_pulse: u64,
     mouse: Option<(i32, i32)>,
@@ -92,6 +108,11 @@ impl Default for Machine {
             load_pending: true,
             command_error: None,
             last_observed: None,
+            last_step: None,
+            last_phase: None,
+            last_reminder_sequence: 0,
+            standup_elapsed: Duration::ZERO,
+            standup_sequence: 0,
             desktop_available: false,
             activity_pulse: 0,
             mouse: None,
@@ -116,6 +137,10 @@ impl Machine {
     }
     fn step(&mut self, now: Duration, calendar: Option<(String, Duration)>, desktop: bool) {
         self.desktop_available = desktop;
+        let step_delta = self
+            .last_step
+            .map_or(Duration::ZERO, |last| now.saturating_sub(last));
+        self.last_step = Some(now);
         if self.load_pending {
             return;
         }
@@ -138,6 +163,38 @@ impl Machine {
             );
         }
         self.focus.tick(now);
+        // Sitting time only accrues while the desktop is usable; locking or
+        // sleeping the machine counts as a break already.
+        if desktop && self.preferences.standup_minutes > 0 {
+            // Cap the delta so waking from sleep does not dump a whole
+            // suspended interval into the sitting timer at once.
+            self.standup_elapsed += step_delta.min(Duration::from_secs(10));
+            if self.standup_elapsed
+                >= Duration::from_secs(u64::from(self.preferences.standup_minutes) * 60)
+            {
+                self.standup_elapsed = Duration::ZERO;
+                self.standup_sequence = self.standup_sequence.saturating_add(1);
+            }
+        } else if !desktop {
+            // Do not penalise time spent away; resume the interval instead
+            // of firing immediately after a long lock.
+            self.standup_elapsed = self
+                .standup_elapsed
+                .min(Duration::from_secs(30));
+        }
+        let phase = self.focus.snapshot().phase;
+        // Auto-continue only on a naturally completed break — an explicit
+        // stop (Break -> Idle without a new reminder) is a real exit.
+        if self.preferences.auto_continue
+            && self.last_phase == Some(crate::focus::FocusPhase::Break)
+            && phase == crate::focus::FocusPhase::Idle
+            && self.focus.snapshot().reminder == crate::focus::FocusReminder::BreakCompleted
+            && self.focus.snapshot().reminder_sequence != self.last_reminder_sequence
+        {
+            let _ = self.focus.command(FocusCommand::Start, now);
+        }
+        self.last_phase = Some(phase);
+        self.last_reminder_sequence = self.focus.snapshot().reminder_sequence;
     }
     fn command(&mut self, command: Command, now: Duration) -> Result<(), String> {
         if self.load_pending {
@@ -170,6 +227,16 @@ impl Machine {
                 self.preferences.name = name.into();
                 Ok(())
             }
+            Command::SetStandup(minutes) if minutes <= 180 => {
+                self.preferences.standup_minutes = minutes;
+                self.standup_elapsed = Duration::ZERO;
+                Ok(())
+            }
+            Command::SetStandup(_) => Err("Stand-up interval must be at most 180 minutes".into()),
+            Command::SetAutoContinue(enabled) => {
+                self.preferences.auto_continue = enabled;
+                Ok(())
+            }
             Command::Shutdown => Ok(()),
         }
     }
@@ -182,6 +249,7 @@ impl Machine {
             command_error: self.command_error.clone(),
             activity_pulse: self.activity_pulse,
             mouse: self.mouse,
+            standup_sequence: self.standup_sequence,
             revision: self.revision,
             last_ack: self.last_ack,
         }
@@ -574,6 +642,91 @@ mod tests {
             machine
                 .command(Command::Focus(FocusCommand::Resume), Duration::from_secs(1))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn standup_timer_fires_once_per_interval_and_ignores_locks() {
+        let mut machine = Machine::default();
+        machine
+            .restore(Document::default(), Duration::ZERO)
+            .unwrap();
+        machine.step(Duration::ZERO, Some(calendar()), true);
+        machine
+            .command(Command::SetStandup(1), Duration::ZERO)
+            .unwrap();
+        // The per-step delta is capped, so accrue a minute in 10s steps.
+        for seconds in (10..=60).step_by(10) {
+            machine.step(Duration::from_secs(seconds), Some(calendar()), true);
+        }
+        assert_eq!(machine.snapshot().standup_sequence, 1);
+        // A locked desktop must not dump its whole interval on unlock.
+        machine.step(Duration::from_secs(70), Some(calendar()), false);
+        machine.step(Duration::from_secs(75), Some(calendar()), true);
+        assert_eq!(machine.snapshot().standup_sequence, 1);
+        machine
+            .command(Command::SetStandup(0), Duration::from_secs(75))
+            .unwrap();
+        machine.step(Duration::from_secs(400), Some(calendar()), true);
+        assert_eq!(machine.snapshot().standup_sequence, 1);
+        assert!(
+            machine
+                .command(Command::SetStandup(181), Duration::from_secs(400))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn auto_continue_starts_after_completed_break_but_not_after_manual_stop() {
+        let mut machine = Machine::default();
+        machine
+            .restore(Document::default(), Duration::ZERO)
+            .unwrap();
+        machine.step(Duration::ZERO, Some(calendar()), true);
+        machine
+            .command(
+                Command::Focus(FocusCommand::Configure {
+                    focus_minutes: 1,
+                    break_minutes: 1,
+                }),
+                Duration::ZERO,
+            )
+            .unwrap();
+        machine
+            .command(Command::SetAutoContinue(true), Duration::ZERO)
+            .unwrap();
+        machine
+            .command(Command::Focus(FocusCommand::Start), Duration::ZERO)
+            .unwrap();
+        // Gaps above five seconds suspend the session, so tick in 5s steps.
+        for seconds in (5..=65).step_by(5) {
+            machine.step(Duration::from_secs(seconds), Some(calendar()), true);
+        }
+        assert_eq!(
+            machine.snapshot().focus.phase,
+            crate::focus::FocusPhase::Break
+        );
+        for seconds in (70..=120).step_by(5) {
+            machine.step(Duration::from_secs(seconds), Some(calendar()), true);
+        }
+        assert_eq!(
+            machine.snapshot().focus.phase,
+            crate::focus::FocusPhase::Focus
+        );
+        // Manual stop during the next break must stay idle.
+        for seconds in (125..=180).step_by(5) {
+            machine.step(Duration::from_secs(seconds), Some(calendar()), true);
+        }
+        machine
+            .command(
+                Command::Focus(FocusCommand::Stop),
+                Duration::from_secs(185),
+            )
+            .unwrap();
+        machine.step(Duration::from_secs(190), Some(calendar()), true);
+        assert_eq!(
+            machine.snapshot().focus.phase,
+            crate::focus::FocusPhase::Idle
         );
     }
 
