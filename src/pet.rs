@@ -1,7 +1,7 @@
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     App, Context, Image, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Window,
-    div, img, prelude::*, px, rgba, size,
+    div, img, prelude::*, px, size,
 };
 use lamar_pet::{focus::FocusPhase, service::Client, sprites::SpriteAtlas};
 use std::{
@@ -253,27 +253,7 @@ impl Render for PetView {
                 cx.listener(|view, _: &MouseUpEvent, _, cx| view.end_drag(cx)),
             )
             .on_mouse_down(MouseButton::Right, move |_, _, cx| open_panel(cx))
-            .child(
-                div()
-                    .relative()
-                    .w(px(side))
-                    .h(px(side))
-                    // A soft dark disc keeps the sprite readable over any
-                    // wallpaper, light or dark.
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(side * 0.06))
-                            .left(px(side * 0.06))
-                            .w(px(side * 0.88))
-                            .h(px(side * 0.88))
-                            .rounded_full()
-                            .bg(rgba(0x10141c59))
-                            .border_1()
-                            .border_color(rgba(0xffffff24)),
-                    )
-                    .child(img(image).w(px(side)).h(px(side))),
-            )
+            .child(img(image).w(px(side)).h(px(side)))
             .child(
                 div()
                     .rounded_full()
