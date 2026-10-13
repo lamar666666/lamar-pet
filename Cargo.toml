@@ -1,0 +1,38 @@
+[package]
+name = "lamar-pet"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+description = "An original sprite desktop pet with local focus sessions"
+repository = "https://github.com/lamar666666/lamar-pet"
+
+[dependencies]
+gpui-kit = "=0.7.3"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+atomic-write-file = "=0.3.1"
+time = { version = "=0.3.55", features = ["local-offset"] }
+dirs = "=7.0.0"
+tray-icon = "=0.26.1"
+muda = "=0.21.2"
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_StationsAndDesktops"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[build-dependencies]
+embed-resource = "=3.0.12"
+image = { version = "=0.25.10", default-features = false, features = ["png", "ico"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "symbols"
+
+[lints.clippy]
+dbg_macro = "deny"
+print_stdout = "deny"
