@@ -560,24 +560,7 @@ impl Render for MainView {
                             .disabled(blocked),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().flex_1().child("数据目录"))
-                    .child(
-                        Button::new("open-data-dir").label("打开").on_click(
-                            move |_, _, cx| open_data_dir(&data_dir, cx),
-                        ),
-                    ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.data_dir.display().to_string()),
-            )
+            .child(data_card(&focus.checkpoint, data_dir, cx))
             .child(
                 div()
                     .text_xs()
@@ -686,6 +669,96 @@ fn week_strip(
         .border_color(border)
         .child(div().text_sm().text_color(muted).child("本周专注（分钟）"))
         .child(strip)
+}
+
+/// Friendly data summary: lifetime totals plus a backup button — no raw
+/// paths or file names that non-developers would not recognise.
+fn data_card(
+    checkpoint: &FocusCheckpoint,
+    data_dir: Rc<std::path::Path>,
+    cx: &mut Context<MainView>,
+) -> impl IntoElement {
+    let muted = cx.theme().muted_foreground;
+    let border = cx.theme().border;
+    let total_minutes: u64 = checkpoint
+        .history
+        .iter()
+        .map(|day| day.focus_millis / 60_000)
+        .sum();
+    let total_rounds: u32 = checkpoint.history.iter().map(|day| day.completed_rounds).sum();
+    let streak = focus_streak(checkpoint);
+    let duration = if total_minutes >= 60 {
+        format!("{:.1} 小时", total_minutes as f32 / 60.0)
+    } else {
+        format!("{total_minutes} 分钟")
+    };
+    let cell = |value: String, label: &'static str| {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .child(div().text_lg().child(value))
+            .child(div().text_xs().text_color(muted).child(label))
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(border)
+        .child(div().text_sm().text_color(muted).child("我的数据"))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .child(cell(format!("{} 天", checkpoint.history.len()), "陪伴天数"))
+                .child(cell(duration, "累计专注"))
+                .child(cell(format!("{total_rounds} 轮"), "完成轮数"))
+                .child(cell(format!("{streak} 天"), "连续专注")),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("数据只保存在这台电脑上"),
+                )
+                .child(Button::new("open-data-dir").label("备份数据").on_click(
+                    move |_, _, cx| open_data_dir(&data_dir, cx),
+                )),
+        )
+}
+
+/// Consecutive days with recorded focus, ending today (or yesterday when
+/// today has none yet).
+fn focus_streak(checkpoint: &FocusCheckpoint) -> u32 {
+    if checkpoint.calendar_day.len() < 10 {
+        return 0;
+    }
+    let mut streak = 0;
+    let mut day = checkpoint.calendar_day.clone();
+    loop {
+        let focused = checkpoint
+            .history
+            .iter()
+            .any(|entry| entry.day == day && entry.focus_millis > 0);
+        if focused {
+            streak += 1;
+        } else if streak > 0 || day != checkpoint.calendar_day {
+            break;
+        }
+        day = prev_day(&day);
+    }
+    streak
 }
 
 fn prev_day(day: &str) -> String {
