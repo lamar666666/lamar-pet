@@ -228,6 +228,14 @@ impl Render for MainView {
         let focus = &self.snapshot.focus;
         let idle = focus.phase == FocusPhase::Idle;
         let blocked = self.snapshot.load_pending || self.pending.is_some();
+        let background = cx.theme().background;
+        let surface = cx.theme().popover;
+        let muted_bg = cx.theme().muted;
+        let muted_fg = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let primary = cx.theme().primary;
+        let progress_bar = cx.theme().progress_bar;
+        let accent = cx.theme().accent;
         let (state, action, button) = match focus.phase {
             FocusPhase::Idle => ("准备开始", FocusCommand::Start, "开始专注"),
             FocusPhase::Focus => ("正在专注", FocusCommand::Pause, "暂停"),
@@ -239,6 +247,21 @@ impl Render for MainView {
         } else {
             focus.remaining_seconds
         };
+        let phase_tone = if matches!(focus.phase, FocusPhase::Focus | FocusPhase::Break) {
+            primary
+        } else {
+            muted_fg
+        };
+        let session_total = match focus.phase {
+            FocusPhase::Break | FocusPhase::PausedBreak => u64::from(focus.break_minutes) * 60,
+            _ => u64::from(focus.focus_minutes) * 60,
+        };
+        let progress = if idle || session_total == 0 {
+            0.0
+        } else {
+            (1.0 - seconds as f32 / session_total as f32)
+                .clamp(0.03, 1.0)
+        };
         let mut content = div()
             .id("main-scroll")
             .size_full()
@@ -246,15 +269,21 @@ impl Render for MainView {
             .flex()
             .flex_col()
             .gap_4()
-            .p_6()
-            .bg(cx.theme().background)
+            .p_5()
+            .bg(background)
             .text_color(cx.theme().foreground)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_4()
-                    .child(img(self.atlas.frames[0].clone()).w(px(72.0)).h(px(72.0)))
+                    .gap_3()
+                    .child(
+                        div()
+                            .p_2()
+                            .rounded_lg()
+                            .bg(accent)
+                            .child(img(self.atlas.frames[0].clone()).w(px(52.0)).h(px(52.0))),
+                    )
                     .child(
                         div()
                             .flex()
@@ -262,16 +291,31 @@ impl Render for MainView {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_2xl()
+                                    .text_xl()
                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child(self.snapshot.preferences.name.clone()),
                             )
                             .child(
                                 div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_xs()
+                                    .text_color(muted_fg)
                                     .child("桌面专注伴侣"),
                             ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(border)
+                            .bg(surface)
+                            .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(phase_tone))
+                            .child(div().text_xs().child(state)),
                     ),
             )
             .child(
@@ -279,21 +323,29 @@ impl Render for MainView {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_2()
+                    .gap_3()
                     .p_5()
                     .rounded_xl()
-                    .bg(cx.theme().muted)
+                    .bg(muted_bg)
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(state),
+                            .text_size(px(56.0))
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(format!("{:02}:{:02}", seconds / 60, seconds % 60)),
                     )
                     .child(
                         div()
-                            .text_size(px(60.0))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(format!("{:02}:{:02}", seconds / 60, seconds % 60)),
+                            .h(px(6.0))
+                            .w_full()
+                            .rounded_full()
+                            .bg(border)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(gpui_kit::relative(progress))
+                                    .rounded_full()
+                                    .bg(progress_bar),
+                            ),
                     )
                     .child(
                         div()
@@ -318,30 +370,34 @@ impl Render for MainView {
                             ),
                     ),
             )
+            .child(section_label("今日概览", muted_fg))
             .child(
                 div()
                     .flex()
-                    .gap_4()
+                    .gap_3()
                     .child(
                         div()
                             .flex_1()
                             .flex()
                             .flex_col()
+                            .items_center()
                             .gap_1()
                             .p_3()
-                            .rounded_lg()
+                            .rounded_xl()
                             .border_1()
-                            .border_color(cx.theme().border)
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("今日专注"),
-                            )
+                            .border_color(border)
+                            .bg(surface)
                             .child(
                                 div()
                                     .text_xl()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child(format!("{} 分钟", focus.today_focus_seconds / 60)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_fg)
+                                    .child("今日专注"),
                             ),
                     )
                     .child(
@@ -349,27 +405,31 @@ impl Render for MainView {
                             .flex_1()
                             .flex()
                             .flex_col()
+                            .items_center()
                             .gap_1()
                             .p_3()
-                            .rounded_lg()
+                            .rounded_xl()
                             .border_1()
-                            .border_color(cx.theme().border)
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("完成轮数"),
-                            )
+                            .border_color(border)
+                            .bg(surface)
                             .child(
                                 div()
                                     .text_xl()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child(focus.today_completed_rounds.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_fg)
+                                    .child("完成轮数"),
                             ),
                     ),
             )
             .child(week_strip(&focus.checkpoint, cx));
         let focus_minutes = focus.focus_minutes;
         let break_minutes = focus.break_minutes;
+        let mut settings_rows = Vec::new();
         for (is_focus, value, label, maximum) in [
             (true, focus_minutes, "专注时长", 180),
             (false, break_minutes, "休息时长", 60),
@@ -392,12 +452,14 @@ impl Render for MainView {
             } else {
                 self.break_input.clone()
             };
-            content = content.child(
+            settings_rows.push(
                 div()
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .child(div().flex_1().child(label))
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .child(div().flex_1().text_sm().child(label))
                     .child(
                         Button::new(if is_focus { "focus-less" } else { "break-less" })
                             .label("−")
@@ -408,15 +470,10 @@ impl Render for MainView {
                     )
                     .child(
                         Input::new(&input)
-                            .w(px(64.0))
+                            .w(px(56.0))
                             .disabled(blocked || !idle),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("分钟"),
-                    )
+                    .child(div().text_xs().text_color(muted_fg).child("分钟"))
                     .child(
                         Button::new(if is_focus { "focus-more" } else { "break-more" })
                             .label("+")
@@ -427,35 +484,15 @@ impl Render for MainView {
                     ),
             );
         }
-        let appearance = self.snapshot.preferences.appearance;
-        let auto_continue = self.snapshot.preferences.auto_continue;
-        let mut themes = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().flex_1().child("外观"));
-        for (mode, id, label) in [
-            (Appearance::Light, "light", "浅色"),
-            (Appearance::Dark, "dark", "深色"),
-            (Appearance::System, "system", "系统"),
-        ] {
-            themes = themes.child(
-                Button::new(id)
-                    .label(label)
-                    .selected(mode == appearance)
-                    .disabled(blocked)
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.send(Command::SetAppearance(mode), cx)
-                    })),
-            );
-        }
         let scale = self.snapshot.preferences.scale_percent;
-        content = content.child(themes).child(
+        settings_rows.push(
             div()
                 .flex()
                 .items_center()
-                .gap_3()
-                .child(div().flex_1().child("桌宠大小"))
+                .gap_2()
+                .px_4()
+                .py_3()
+                .child(div().flex_1().text_sm().child("桌宠大小"))
                 .child(
                     Button::new("smaller")
                         .label("−")
@@ -464,7 +501,13 @@ impl Render for MainView {
                             view.send(Command::SetScale(scale.saturating_sub(10).max(50)), cx)
                         })),
                 )
-                .child(format!("{scale}%"))
+                .child(
+                    div()
+                        .w(px(56.0))
+                        .text_sm()
+                        .text_center()
+                        .child(format!("{scale}%")),
+                )
                 .child(
                     Button::new("larger")
                         .label("+")
@@ -474,9 +517,92 @@ impl Render for MainView {
                         })),
                 ),
         );
+        settings_rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .child(div().flex_1().text_sm().child("久坐提醒"))
+                .child(Input::new(&self.standup_input).w(px(56.0)).disabled(blocked))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted_fg)
+                        .child("分钟，0 关闭"),
+                ),
+        );
+        let auto_continue = self.snapshot.preferences.auto_continue;
+        settings_rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .child(div().flex_1().text_sm().child("自动连转"))
+                .child(
+                    Button::new("auto-on")
+                        .label("开启")
+                        .selected(auto_continue)
+                        .disabled(blocked)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.send(Command::SetAutoContinue(true), cx)
+                        })),
+                )
+                .child(
+                    Button::new("auto-off")
+                        .label("关闭")
+                        .selected(!auto_continue)
+                        .disabled(blocked)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.send(Command::SetAutoContinue(false), cx)
+                        })),
+                ),
+        );
+        let appearance = self.snapshot.preferences.appearance;
+        let mut theme_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .child(div().flex_1().text_sm().child("外观"));
+        for (mode, id, label) in [
+            (Appearance::Light, "light", "浅色"),
+            (Appearance::Dark, "dark", "深色"),
+            (Appearance::System, "system", "系统"),
+        ] {
+            theme_row = theme_row.child(
+                Button::new(id)
+                    .label(label)
+                    .selected(mode == appearance)
+                    .disabled(blocked)
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.send(Command::SetAppearance(mode), cx)
+                    })),
+            );
+        }
+        settings_rows.push(theme_row);
+        settings_rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .child(div().flex_1().text_sm().child("宠物名"))
+                .child(
+                    Input::new(&self.name_input)
+                        .w(px(160.0))
+                        .disabled(blocked),
+                ),
+        );
         if self.snapshot.storage_error {
             content = content.child(
                 div()
+                    .px_1()
                     .text_sm()
                     .text_color(cx.theme().danger)
                     .child("本地数据无法读取或保存，正在重试。"),
@@ -484,6 +610,7 @@ impl Render for MainView {
         } else if self.send_error || self.snapshot.command_error.is_some() {
             content = content.child(
                 div()
+                    .px_1()
                     .text_sm()
                     .text_color(cx.theme().danger)
                     .child("操作暂未完成，请重试。"),
@@ -500,71 +627,34 @@ impl Render for MainView {
         };
         if let Some(message) = reminder {
             content = content.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().primary)
-                    .child(message),
+                div().px_1().text_sm().text_color(primary).child(message),
             );
         }
-        content = content
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().flex_1().child("久坐提醒"))
-                    .child(Input::new(&self.standup_input).w(px(64.0)).disabled(blocked))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("分钟，0 关闭"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().flex_1().child("自动连转"))
-                    .child(
-                        Button::new("auto-on")
-                            .label("开启")
-                            .selected(auto_continue)
-                            .disabled(blocked)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.send(Command::SetAutoContinue(true), cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("auto-off")
-                            .label("关闭")
-                            .selected(!auto_continue)
-                            .disabled(blocked)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.send(Command::SetAutoContinue(false), cx)
-                            })),
-                    ),
-            );
+        content = content.child(section_label("偏好设置", muted_fg));
+        let mut settings = div()
+            .flex()
+            .flex_col()
+            .rounded_xl()
+            .border_1()
+            .border_color(border)
+            .bg(surface);
+        let mut first = true;
+        for row in settings_rows {
+            if !first {
+                settings = settings.child(div().h(px(1.0)).bg(border));
+            }
+            settings = settings.child(row);
+            first = false;
+        }
         let data_dir = self.data_dir.clone();
         content
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().flex_1().child("宠物名"))
-                    .child(
-                        Input::new(&self.name_input)
-                            .w(px(180.0))
-                            .disabled(blocked),
-                    ),
-            )
+            .child(settings)
             .child(data_card(&focus.checkpoint, data_dir, cx))
             .child(
                 div()
+                    .px_1()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(muted_fg)
                     .child("左键拖动桌宠，点一下它会高兴，右键打开面板。"),
             )
     }
@@ -582,6 +672,15 @@ fn open_data_dir(dir: &std::path::Path, cx: &mut App) {
     }
 }
 
+fn section_label(text: &'static str, color: gpui_kit::Hsla) -> impl IntoElement {
+    div()
+        .px_1()
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(text)
+}
+
 /// Seven-day strip of focus minutes ending today; today's bar is highlighted.
 fn week_strip(
     checkpoint: &FocusCheckpoint,
@@ -589,7 +688,10 @@ fn week_strip(
 ) -> impl IntoElement {
     let muted = cx.theme().muted_foreground;
     let border = cx.theme().border;
+    let surface = cx.theme().popover;
     let primary = cx.theme().primary;
+    let mut past = primary;
+    past.a = 0.35;
     if checkpoint.calendar_day.len() < 10 {
         return div();
     }
@@ -649,7 +751,7 @@ fn week_strip(
                         .w_full()
                         .h(px(height))
                         .rounded_sm()
-                        .bg(if today { primary } else { muted }),
+                        .bg(if today { primary } else { past }),
                 )
                 .child(
                     div()
@@ -664,9 +766,10 @@ fn week_strip(
         .flex_col()
         .gap_2()
         .p_3()
-        .rounded_lg()
+        .rounded_xl()
         .border_1()
         .border_color(border)
+        .bg(surface)
         .child(div().text_sm().text_color(muted).child("本周专注（分钟）"))
         .child(strip)
 }
@@ -680,6 +783,7 @@ fn data_card(
 ) -> impl IntoElement {
     let muted = cx.theme().muted_foreground;
     let border = cx.theme().border;
+    let surface = cx.theme().popover;
     let total_minutes: u64 = checkpoint
         .history
         .iter()
@@ -707,9 +811,10 @@ fn data_card(
         .flex_col()
         .gap_2()
         .p_3()
-        .rounded_lg()
+        .rounded_xl()
         .border_1()
         .border_color(border)
+        .bg(surface)
         .child(div().text_sm().text_color(muted).child("我的数据"))
         .child(
             div()
