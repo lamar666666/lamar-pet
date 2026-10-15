@@ -469,7 +469,7 @@ impl PetView {
     }
 
     #[cfg(not(windows))]
-    fn follow_drag(&mut self, _window: &mut Window) {}
+    fn follow_drag(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 }
 
 impl Render for PetView {

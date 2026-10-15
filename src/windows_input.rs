@@ -1,6 +1,7 @@
 //! Passive sampling exports activity totals only; key identities stay ephemeral.
 use std::time::Duration;
 
+#[cfg(any(windows, test))]
 fn desktop_name_is_available(name: &str) -> bool {
     !name.is_empty()
         && !name.eq_ignore_ascii_case("Winlogon")
@@ -56,6 +57,7 @@ pub struct InputSample {
     pub desktop_available: bool,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct Sampler {
     pressed: [bool; 256],
     desktop_available: bool,
