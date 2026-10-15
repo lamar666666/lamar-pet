@@ -1,0 +1,80 @@
+name: macOS release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach assets to
+        required: false
+        default: "v0.1.0"
+        type: string
+  release:
+    types: [published]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            suffix: macos-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --target ${{ matrix.target }}
+      - name: Build
+        run: cargo +1.97.1 build --locked --release --target ${{ matrix.target }}
+      - name: Package app bundle
+        run: |
+          set -euo pipefail
+          VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)
+          APP="LamarPet.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/lamar-pet" "$APP/Contents/MacOS/lamar-pet"
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Lamar Pet</string>
+            <key>CFBundleDisplayName</key><string>Lamar Pet</string>
+            <key>CFBundleIdentifier</key><string>cn.lamar.lamar-pet</string>
+            <key>CFBundleExecutable</key><string>lamar-pet</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>LSUIElement</key><true/>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          ICONSET=AppIcon.iconset
+          mkdir -p "$ICONSET"
+          for S in 16 32 64 128 256 512; do
+            sips -z "$S" "$S" assets/lamar-cat.png --out "$ICONSET/icon_${S}x${S}.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist"
+          plutil -lint "$APP/Contents/Info.plist"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "lamar-pet-${{ matrix.suffix }}.zip"
+      - name: Package bare binary
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          cp "target/${{ matrix.target }}/release/lamar-pet" stage/lamar-pet
+          tar -czf "lamar-pet-${{ matrix.suffix }}.tar.gz" -C stage lamar-pet
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.event.release.tag_name || 'v0.1.0' }}
+          files: |
+            lamar-pet-${{ matrix.suffix }}.zip
+            lamar-pet-${{ matrix.suffix }}.tar.gz

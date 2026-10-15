@@ -436,6 +436,15 @@ fn play_reminder_sound(enabled: bool) {
             SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
         );
     }
+    #[cfg(target_os = "macos")]
+    {
+        static ALERT: &[u8] = include_bytes!("../assets/alert.wav");
+        let path = std::env::temp_dir().join("lamar-pet-alert.wav");
+        if !path.exists() {
+            let _ = std::fs::write(&path, ALERT);
+        }
+        let _ = std::process::Command::new("afplay").arg(&path).spawn();
+    }
 }
 
 fn show_reminder(reminder: FocusReminder, cx: &mut App) -> Result<(), String> {
