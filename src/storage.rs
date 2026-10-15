@@ -1,5 +1,6 @@
 use crate::focus::FocusCheckpoint;
 use crate::service::Preferences;
+use crate::todo::TodoState;
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,6 +16,8 @@ pub struct Document {
     pub preferences: Preferences,
     #[serde(default)]
     pub checkpoint: FocusCheckpoint,
+    #[serde(default)]
+    pub todo: TodoState,
 }
 
 impl Default for Document {
@@ -23,13 +26,17 @@ impl Default for Document {
             schema_version: 1,
             preferences: Preferences::default(),
             checkpoint: FocusCheckpoint::default(),
+            todo: TodoState::default(),
         }
     }
 }
 
 impl Document {
     pub fn is_valid(&self) -> bool {
-        self.schema_version == 1 && self.preferences.is_valid() && self.checkpoint.is_valid()
+        self.schema_version == 1
+            && self.preferences.is_valid()
+            && self.checkpoint.is_valid()
+            && self.todo.is_valid()
     }
 }
 
@@ -115,6 +122,8 @@ mod tests {
         let doc = store.load().unwrap();
         assert_eq!(doc.preferences.scale_percent, 100);
         assert_eq!(doc.checkpoint.focus_minutes, 25);
+        assert!(doc.preferences.show_todos);
+        assert!(doc.todo.tasks.is_empty());
     }
 
     #[test]
@@ -141,6 +150,36 @@ mod tests {
         let backup: Document =
             serde_json::from_slice(&fs::read(dir.path().join("focus.json.bak")).unwrap()).unwrap();
         assert_eq!(backup.preferences.scale_percent, 100);
+    }
+
+    #[test]
+    fn todo_roundtrip_keeps_completed_history_and_corrupt_todos_are_not_overwritten() {
+        use crate::todo::{TodoCommand, TodoPriority};
+        let dir = tempdir().unwrap();
+        let store = Storage::new(dir.path().into());
+        let mut doc = Document::default();
+        doc.todo
+            .command(
+                TodoCommand::Add {
+                    title: "keep completed task".into(),
+                    priority: TodoPriority::High,
+                    due_minute: Some(1439),
+                },
+                "2026-10-14",
+            )
+            .unwrap();
+        doc.todo
+            .command(TodoCommand::Toggle(1), "2026-10-15")
+            .unwrap();
+        store.save(&doc).unwrap();
+        assert_eq!(store.load().unwrap().todo, doc.todo);
+        let mut corrupt = doc.clone();
+        corrupt.todo.next_id = 1;
+        let bytes = serde_json::to_vec(&corrupt).unwrap();
+        fs::write(dir.path().join("focus.json"), &bytes).unwrap();
+        assert!(store.load().is_err());
+        assert!(store.save(&doc).is_err());
+        assert_eq!(fs::read(dir.path().join("focus.json")).unwrap(), bytes);
     }
 
     #[test]

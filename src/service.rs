@@ -1,5 +1,6 @@
 use crate::focus::{FocusCommand, FocusSnapshot, FocusState};
 use crate::storage::{Document, Storage};
+use crate::todo::{TodoCommand, TodoState};
 use crate::windows_input::Sampler;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -32,6 +33,10 @@ pub struct Preferences {
     pub standup_minutes: u16,
     /// Start the next focus round automatically when a break ends.
     pub auto_continue: bool,
+    /// Keep the top three unfinished tasks visible below the pet.
+    pub show_todos: bool,
+    /// Play the bundled chime when a reminder fires.
+    pub sound_enabled: bool,
 }
 
 impl Default for Preferences {
@@ -42,6 +47,8 @@ impl Default for Preferences {
             name: "Lamar Pet".into(),
             standup_minutes: 45,
             auto_continue: false,
+            show_todos: true,
+            sound_enabled: true,
         }
     }
 }
@@ -58,17 +65,22 @@ impl Preferences {
 #[derive(Clone, Debug)]
 pub enum Command {
     Focus(FocusCommand),
+    Todo(TodoCommand),
+    StartTodoFocus(u64),
+    SetShowTodos(bool),
     SetScale(u16),
     SetAppearance(Appearance),
     SetName(String),
     SetStandup(u16),
     SetAutoContinue(bool),
+    SetSound(bool),
     Shutdown,
 }
 
 #[derive(Clone, Debug)]
 pub struct AppSnapshot {
     pub focus: FocusSnapshot,
+    pub todo: TodoState,
     pub preferences: Preferences,
     pub storage_error: bool,
     pub load_pending: bool,
@@ -83,6 +95,8 @@ pub struct AppSnapshot {
 
 struct Machine {
     focus: FocusState,
+    todo: TodoState,
+    local_day: Option<String>,
     preferences: Preferences,
     storage_error: bool,
     load_pending: bool,
@@ -103,6 +117,8 @@ impl Default for Machine {
     fn default() -> Self {
         Self {
             focus: FocusState::default(),
+            todo: TodoState::default(),
+            local_day: None,
             preferences: Preferences::default(),
             storage_error: false,
             load_pending: true,
@@ -130,6 +146,7 @@ impl Machine {
             .command(FocusCommand::Restore(document.checkpoint), now)
             .map_err(|_| "Unable to restore focus data")?;
         self.preferences = document.preferences;
+        self.todo = document.todo;
         self.load_pending = false;
         self.storage_error = false;
         self.last_observed = Some(now);
@@ -137,6 +154,7 @@ impl Machine {
     }
     fn step(&mut self, now: Duration, calendar: Option<(String, Duration)>, desktop: bool) {
         self.desktop_available = desktop;
+        self.local_day = calendar.as_ref().map(|(day, _)| day.clone());
         let step_delta = self
             .last_step
             .map_or(Duration::ZERO, |last| now.saturating_sub(last));
@@ -178,9 +196,7 @@ impl Machine {
         } else if !desktop {
             // Do not penalise time spent away; resume the interval instead
             // of firing immediately after a long lock.
-            self.standup_elapsed = self
-                .standup_elapsed
-                .min(Duration::from_secs(30));
+            self.standup_elapsed = self.standup_elapsed.min(Duration::from_secs(30));
         }
         let phase = self.focus.snapshot().phase;
         // Auto-continue only on a naturally completed break — an explicit
@@ -193,6 +209,28 @@ impl Machine {
         {
             let _ = self.focus.command(FocusCommand::Start, now);
         }
+        // A naturally finished round checks off its linked task. An explicit
+        // stop or pause never completes the task, and a task already toggled
+        // during the round is left done rather than flipped back open.
+        if self.last_phase == Some(crate::focus::FocusPhase::Focus)
+            && phase == crate::focus::FocusPhase::Break
+            && self.focus.snapshot().reminder == crate::focus::FocusReminder::FocusCompleted
+            && self.focus.snapshot().reminder_sequence != self.last_reminder_sequence
+            && let Some(id) = self.todo.selected_id
+        {
+            if self
+                .todo
+                .tasks
+                .iter()
+                .any(|task| task.id == id && !task.done)
+            {
+                let _ = self.todo.command(
+                    TodoCommand::Toggle(id),
+                    self.local_day.as_deref().unwrap_or(""),
+                );
+            }
+            self.todo.selected_id = None;
+        }
         self.last_phase = Some(phase);
         self.last_reminder_sequence = self.focus.snapshot().reminder_sequence;
     }
@@ -201,6 +239,48 @@ impl Machine {
             return Err("Focus data is unavailable; retrying load".into());
         }
         match command {
+            Command::Todo(command) => self
+                .todo
+                .command(command, self.local_day.as_deref().unwrap_or("")),
+            Command::StartTodoFocus(id) => {
+                use crate::focus::FocusPhase;
+                if !self.desktop_available {
+                    return Err("Focus is paused while the desktop is unavailable".into());
+                }
+                if !self
+                    .todo
+                    .tasks
+                    .iter()
+                    .any(|task| task.id == id && !task.done)
+                {
+                    return Err("Select an unfinished task".into());
+                }
+                let focus_command = match self.focus.snapshot().phase {
+                    FocusPhase::Idle => Some(FocusCommand::Start),
+                    FocusPhase::PausedFocus => Some(FocusCommand::Resume),
+                    FocusPhase::Focus => None,
+                    FocusPhase::Break | FocusPhase::PausedBreak => {
+                        return Err(
+                            "Finish or stop the current break before focusing on a task".into()
+                        );
+                    }
+                };
+                if let Some(command) = focus_command {
+                    self.focus
+                        .command(command, now)
+                        .map_err(|_| "Unable to start task focus")?;
+                } else {
+                    // Keep elapsed and remaining time when changing the label of
+                    // an already running focus round; never silently restart it.
+                    self.focus.tick(now);
+                }
+                self.todo.selected_id = Some(id);
+                Ok(())
+            }
+            Command::SetShowTodos(enabled) => {
+                self.preferences.show_todos = enabled;
+                Ok(())
+            }
             Command::Focus(FocusCommand::Start | FocusCommand::Resume)
                 if !self.desktop_available =>
             {
@@ -237,12 +317,17 @@ impl Machine {
                 self.preferences.auto_continue = enabled;
                 Ok(())
             }
+            Command::SetSound(enabled) => {
+                self.preferences.sound_enabled = enabled;
+                Ok(())
+            }
             Command::Shutdown => Ok(()),
         }
     }
     fn snapshot(&self) -> AppSnapshot {
         AppSnapshot {
             focus: self.focus.snapshot(),
+            todo: self.todo.clone(),
             preferences: self.preferences.clone(),
             storage_error: self.storage_error,
             load_pending: self.load_pending,
@@ -259,6 +344,7 @@ impl Machine {
             schema_version: 1,
             preferences: self.preferences.clone(),
             checkpoint: self.focus.snapshot().checkpoint,
+            todo: self.todo.clone(),
         }
     }
 }
@@ -500,6 +586,204 @@ mod tests {
     }
 
     #[test]
+    fn adding_task_requires_current_local_date_not_stale_focus_checkpoint() {
+        use crate::todo::{TodoCommand, TodoPriority};
+        let mut machine = Machine::default();
+        machine
+            .restore(Document::default(), Duration::ZERO)
+            .unwrap();
+        machine.step(Duration::ZERO, Some(calendar()), true);
+        machine.step(Duration::from_secs(1), None, true);
+        assert!(
+            machine
+                .command(
+                    Command::Todo(TodoCommand::Add {
+                        title: "cannot use yesterday".into(),
+                        priority: TodoPriority::Normal,
+                        due_minute: None
+                    }),
+                    Duration::from_secs(1)
+                )
+                .is_err()
+        );
+        assert!(machine.snapshot().todo.tasks.is_empty());
+    }
+
+    #[test]
+    fn todo_focus_switch_keeps_round_time_and_completion_is_explicit() {
+        use crate::todo::{TodoCommand, TodoPriority};
+        let mut machine = Machine::default();
+        machine
+            .restore(Document::default(), Duration::ZERO)
+            .unwrap();
+        machine.step(Duration::ZERO, Some(calendar()), true);
+        for title in ["one", "two"] {
+            machine
+                .command(
+                    Command::Todo(TodoCommand::Add {
+                        title: title.into(),
+                        priority: TodoPriority::Normal,
+                        due_minute: None,
+                    }),
+                    Duration::ZERO,
+                )
+                .unwrap();
+        }
+        machine
+            .command(Command::StartTodoFocus(1), Duration::ZERO)
+            .unwrap();
+        machine.step(Duration::from_secs(2), Some(calendar()), true);
+        let remaining = machine.snapshot().focus.remaining_seconds;
+        machine
+            .command(Command::StartTodoFocus(2), Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(machine.snapshot().focus.remaining_seconds, remaining);
+        assert_eq!(machine.snapshot().todo.selected_id, Some(2));
+        // The focus engine alone never touches todo state; linked completion
+        // is a Machine-level policy exercised below.
+        machine.focus.tick(Duration::from_secs(1500));
+        assert!(machine.snapshot().todo.tasks.iter().all(|task| !task.done));
+        assert!(
+            machine
+                .command(Command::StartTodoFocus(1), Duration::from_secs(1500))
+                .is_err()
+        );
+        assert_eq!(machine.snapshot().todo.selected_id, Some(2));
+        assert_eq!(machine.document().todo, machine.snapshot().todo);
+    }
+
+    #[test]
+    fn finished_round_completes_linked_task_but_stop_and_manual_done_do_not() {
+        use crate::todo::{TodoCommand, TodoPriority};
+        let advance = |machine: &mut Machine, from: u64, to: u64| {
+            // Steps beyond five seconds suspend the session, so walk the
+            // clock in small increments like the real worker does.
+            for second in (from + 1)..=to {
+                machine.step(
+                    Duration::from_secs(second),
+                    Some(("2026-10-13".into(), Duration::from_secs(3600 + second))),
+                    true,
+                );
+            }
+        };
+        let add = |machine: &mut Machine, title: &str| {
+            machine
+                .command(
+                    Command::Todo(TodoCommand::Add {
+                        title: title.into(),
+                        priority: TodoPriority::Normal,
+                        due_minute: None,
+                    }),
+                    Duration::ZERO,
+                )
+                .unwrap();
+        };
+        let mut machine = Machine::default();
+        machine
+            .restore(Document::default(), Duration::ZERO)
+            .unwrap();
+        machine.step(Duration::ZERO, Some(calendar()), true);
+        add(&mut machine, "linked");
+        add(&mut machine, "stays-open");
+        add(&mut machine, "pre-done");
+        // A naturally finished round checks off its linked task and clears
+        // the selection; unrelated tasks stay untouched.
+        machine
+            .command(Command::StartTodoFocus(1), Duration::ZERO)
+            .unwrap();
+        advance(&mut machine, 0, 1501);
+        let snapshot = machine.snapshot();
+        assert_eq!(snapshot.focus.phase, crate::focus::FocusPhase::Break);
+        assert!(
+            snapshot
+                .todo
+                .tasks
+                .iter()
+                .any(|task| task.id == 1 && task.done)
+        );
+        assert!(
+            snapshot
+                .todo
+                .tasks
+                .iter()
+                .all(|task| task.id == 1 || !task.done)
+        );
+        assert_eq!(snapshot.todo.selected_id, None);
+        // An explicit stop leaves the linked task open.
+        machine
+            .command(
+                Command::Focus(FocusCommand::Stop),
+                Duration::from_secs(1501),
+            )
+            .unwrap();
+        machine
+            .command(Command::StartTodoFocus(2), Duration::from_secs(1501))
+            .unwrap();
+        machine
+            .command(
+                Command::Focus(FocusCommand::Stop),
+                Duration::from_secs(1502),
+            )
+            .unwrap();
+        machine.step(
+            Duration::from_secs(1503),
+            Some(("2026-10-13".into(), Duration::from_secs(5103))),
+            true,
+        );
+        assert!(
+            machine
+                .snapshot()
+                .todo
+                .tasks
+                .iter()
+                .any(|task| task.id == 2 && !task.done)
+        );
+        // A task toggled done mid-round is never flipped back open.
+        machine
+            .command(Command::StartTodoFocus(3), Duration::from_secs(1503))
+            .unwrap();
+        machine
+            .command(
+                Command::Todo(TodoCommand::Toggle(3)),
+                Duration::from_secs(1504),
+            )
+            .unwrap();
+        advance(&mut machine, 1503, 3005);
+        let snapshot = machine.snapshot();
+        assert!(
+            snapshot
+                .todo
+                .tasks
+                .iter()
+                .any(|task| task.id == 3 && task.done)
+        );
+        assert_eq!(snapshot.todo.selected_id, None);
+    }
+
+    #[test]
+    fn sound_preference_defaults_on_for_old_documents_and_updates_via_command() {
+        // Documents written before the preference existed keep playing sound.
+        let prefs: Preferences = serde_json::from_str(
+            r#"{"scale_percent":100,"appearance":"light","name":"L","standup_minutes":45,"auto_continue":false,"show_todos":true}"#,
+        )
+        .unwrap();
+        assert!(prefs.sound_enabled);
+        let mut machine = Machine::default();
+        machine
+            .restore(Document::default(), Duration::ZERO)
+            .unwrap();
+        machine.step(Duration::ZERO, Some(calendar()), true);
+        machine
+            .command(Command::SetSound(false), Duration::ZERO)
+            .unwrap();
+        assert!(!machine.snapshot().preferences.sound_enabled);
+        assert_eq!(
+            machine.document().preferences.sound_enabled,
+            machine.snapshot().preferences.sound_enabled
+        );
+    }
+
+    #[test]
     fn injected_worker_ticks_pause_on_lock_and_never_count_sleep() {
         let mut machine = Machine::default();
         machine
@@ -718,10 +1002,7 @@ mod tests {
             machine.step(Duration::from_secs(seconds), Some(calendar()), true);
         }
         machine
-            .command(
-                Command::Focus(FocusCommand::Stop),
-                Duration::from_secs(185),
-            )
+            .command(Command::Focus(FocusCommand::Stop), Duration::from_secs(185))
             .unwrap();
         machine.step(Duration::from_secs(190), Some(calendar()), true);
         assert_eq!(

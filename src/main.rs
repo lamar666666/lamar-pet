@@ -3,15 +3,19 @@
     windows_subsystem = "windows"
 )]
 
+mod desktop_layout;
+mod feedback;
 mod metrics;
 mod pet;
+mod quick_entry;
 mod reminder_policy;
 mod tray;
 mod ui;
+mod ui_policy;
 
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use gpui_kit::{
-    App, AppContext, Application, Bounds, Global, QuitMode, TitlebarOptions,
+    App, AppContext, Application, Bounds, Global, QuitMode, TitlebarOptions, WeakEntity,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
     assets::AllAssets, point, px, size,
 };
@@ -36,6 +40,7 @@ struct Owner {
     client: Client,
     atlas: Rc<SpriteAtlas>,
     panel: Option<WindowHandle<Root>>,
+    panel_view: Option<WeakEntity<ui::MainView>>,
     pet: Option<WindowHandle<pet::PetView>>,
     reminder: Option<WindowHandle<Root>>,
     tray: tray::Tray,
@@ -84,6 +89,7 @@ fn run() -> Result<(), String> {
     let client = worker.client();
     let report_client = client.clone();
     let smoke_resume = args.iter().any(|arg| arg == "--smoke-resume");
+    let smoke_reminder = args.iter().any(|arg| arg == "--smoke-reminder");
     let metrics = Arc::new(metrics::Metrics::default());
     let report_metrics = metrics.clone();
     let failures = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -114,6 +120,7 @@ fn run() -> Result<(), String> {
                 client: client.clone(),
                 atlas,
                 panel: None,
+                panel_view: None,
                 pet: None,
                 reminder: None,
                 tray,
@@ -124,6 +131,12 @@ fn run() -> Result<(), String> {
                     show_error(&error);
                 }
                 cx.quit();
+            }
+            // Smoke hook: renders the reminder window and plays the chime once
+            // without waiting for a real focus round to finish.
+            if smoke_reminder {
+                let _ = show_reminder(FocusReminder::FocusCompleted, cx);
+                play_reminder_sound(client.snapshot().preferences.sound_enabled);
             }
             let shutdown_failures = failures.clone();
             cx.on_app_quit(move |cx| {
@@ -147,6 +160,7 @@ fn run() -> Result<(), String> {
                 let mut last_phase: Option<FocusPhase> = None;
                 let mut last_standup: Option<u64> = None;
                 let mut resumed = false;
+                let mut pet_topmost: Option<bool> = None;
                 loop {
                     executor.timer(Duration::from_millis(100)).await;
                     if !cx.update(|cx| cx.has_global::<Owner>()) {
@@ -157,6 +171,28 @@ fn run() -> Result<(), String> {
                         let _ = client.send(Command::Focus(FocusCommand::Resume));
                         resumed = true;
                     }
+                    cx.update(|cx| {
+                        let (panel, pet) = {
+                            let owner = cx.global::<Owner>();
+                            (owner.panel, owner.pet)
+                        };
+                        let panel_alive =
+                            panel.is_some_and(|handle| handle.update(cx, |_, _, _| ()).is_ok());
+                        if !panel_alive {
+                            let owner = cx.global_mut::<Owner>();
+                            owner.panel = None;
+                            owner.panel_view = None;
+                        }
+                        let want_topmost = !panel_alive;
+                        if pet_topmost != Some(want_topmost)
+                            && let Some(pet) = pet
+                        {
+                            let _ = pet.update(cx, |_, window, _| {
+                                crate::pet::set_topmost(window, want_topmost)
+                            });
+                        }
+                        pet_topmost = Some(want_topmost);
+                    });
                     let actions = cx.update(|cx| {
                         let owner = cx.global::<Owner>();
                         owner.tray.update(&snapshot);
@@ -194,6 +230,7 @@ fn run() -> Result<(), String> {
                             if !delivered {
                                 continue;
                             }
+                            play_reminder_sound(snapshot.preferences.sound_enabled);
                         }
                         last_reminder = Some(snapshot.focus.reminder_sequence);
                         if last_standup.is_some_and(|seen| seen != snapshot.standup_sequence)
@@ -202,6 +239,7 @@ fn run() -> Result<(), String> {
                             let _ = cx.update(|cx| {
                                 show_reminder(lamar_pet::focus::FocusReminder::Standup, cx)
                             });
+                            play_reminder_sound(snapshot.preferences.sound_enabled);
                         }
                         last_standup = Some(snapshot.standup_sequence);
                         if snapshot.focus.phase == FocusPhase::Focus
@@ -280,10 +318,10 @@ fn show_panel(cx: &mut App) -> Result<(), String> {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(660.0), px(height)),
+                    size(px(820.0), px(height)),
                     cx,
                 ))),
-                window_min_size: Some(size(px(550.0), px(580.0))),
+                window_min_size: Some(size(px(660.0), px(580.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Lamar Pet".into()),
                     ..Default::default()
@@ -296,6 +334,7 @@ fn show_panel(cx: &mut App) -> Result<(), String> {
                 ui::sync_theme(client.snapshot().preferences.appearance, window, cx);
                 let view =
                     cx.new(|cx| ui::MainView::new(client, atlas, metrics, data_dir, window, cx));
+                cx.global_mut::<Owner>().panel_view = Some(view.downgrade());
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -304,6 +343,20 @@ fn show_panel(cx: &mut App) -> Result<(), String> {
     Ok(())
 }
 
+fn show_task_panel(cx: &mut App) -> Result<(), String> {
+    show_panel(cx)?;
+    let owner = cx.global::<Owner>();
+    let panel = owner.panel;
+    let view = owner.panel_view.as_ref().and_then(|v| v.upgrade());
+    if let (Some(panel), Some(view)) = (panel, view) {
+        panel
+            .update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| view.open_tasks(window, cx))
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 fn show_pet(cx: &mut App) -> Result<(), String> {
     if let Some(handle) = cx.global::<Owner>().pet
         && handle
@@ -317,27 +370,35 @@ fn show_pet(cx: &mut App) -> Result<(), String> {
     let atlas = owner.atlas.clone();
     let metrics = owner.metrics.clone();
     let scale = client.snapshot().preferences.scale_percent;
-    let side = 180.0 * f32::from(scale) / 100.0;
+    let geometry = desktop_layout::geometry(scale, client.snapshot().preferences.show_todos, false);
     let bounds = cx
         .primary_display()
         .map(|display| {
             let display = display.bounds();
             Bounds::new(
                 point(
-                    display.origin.x + display.size.width - px(side + 30.0),
-                    display.origin.y + display.size.height - px(side + 90.0),
+                    display.origin.x + display.size.width - px(geometry.width + 30.0),
+                    display.origin.y + display.size.height - px(geometry.height + 70.0),
                 ),
-                size(px(side), px(side + 28.0)),
+                size(px(geometry.width), px(geometry.height)),
             )
         })
-        .unwrap_or_else(|| Bounds::centered(None, size(px(side), px(side + 28.0)), cx));
+        .unwrap_or_else(|| {
+            Bounds::centered(None, size(px(geometry.width), px(geometry.height)), cx)
+        });
     let handle = cx
         .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: None,
                 window_background: WindowBackgroundAppearance::Transparent,
-                kind: WindowKind::PopUp,
+                // A normal host is useful for accessibility and screenshot
+                // validation of this same component; daily use stays a popup.
+                kind: if std::env::args().any(|arg| arg == "--preview-widget") {
+                    WindowKind::Normal
+                } else {
+                    WindowKind::PopUp
+                },
                 show: true,
                 focus: false,
                 is_resizable: false,
@@ -345,12 +406,9 @@ fn show_pet(cx: &mut App) -> Result<(), String> {
                 ..Default::default()
             },
             move |window, cx| {
-                window.set_window_title(&format!(
-                    "{} · 桌宠",
-                    client.snapshot().preferences.name
-                ));
+                window.set_window_title(&format!("{} · 桌宠", client.snapshot().preferences.name));
                 let callback = Rc::new(|cx: &mut App| {
-                    let _ = show_panel(cx);
+                    let _ = show_task_panel(cx);
                 });
                 cx.new(|cx| pet::PetView::new(client, atlas, callback, metrics, cx))
             },
@@ -360,8 +418,28 @@ fn show_pet(cx: &mut App) -> Result<(), String> {
     Ok(())
 }
 
+/// Plays the bundled chime from memory; no-op when the user disabled sound.
+fn play_reminder_sound(enabled: bool) {
+    if !enabled {
+        return;
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+        #[repr(align(2))]
+        struct Wav(&'static [u8]);
+        static ALERT: Wav = Wav(include_bytes!("../assets/alert.wav"));
+        let _ = PlaySoundW(
+            windows::core::PCWSTR(ALERT.0.as_ptr() as *const u16),
+            None,
+            SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+        );
+    }
+}
+
 fn show_reminder(reminder: FocusReminder, cx: &mut App) -> Result<(), String> {
     let metrics = cx.global::<Owner>().metrics.clone();
+    let image = cx.global::<Owner>().atlas.frames.last().cloned();
     if let Some(handle) = cx.global_mut::<Owner>().reminder.take() {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
@@ -383,7 +461,7 @@ fn show_reminder(reminder: FocusReminder, cx: &mut App) -> Result<(), String> {
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|_| ui::ReminderView::reminder(reminder, metrics));
+                let view = cx.new(|_| ui::ReminderView::reminder(reminder, metrics, image));
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -419,6 +497,7 @@ fn show_hint(message: String, cx: &mut App) -> Result<(), String> {
                 let view = cx.new(|_| ui::ReminderView {
                     message: message.into(),
                     metrics,
+                    image: None,
                 });
                 cx.new(|cx| Root::new(view, window, cx))
             },

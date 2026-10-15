@@ -7,6 +7,9 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // GPUI's composed widget trees can exceed Windows' default 1 MiB main
+    // stack in unoptimized builds. Pages commit on demand, not up front.
+    println!("cargo:rustc-link-arg-bin=lamar-pet=/STACK:8388608");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
     let sheet = image::load_from_memory(include_bytes!("assets/lamar-cat.png"))
         .expect("sprite PNG")
@@ -18,12 +21,15 @@ fn main() {
     image::codecs::ico::IcoEncoder::new(File::create(&icon_path).expect("icon output"))
         .write_image(&icon, 64, 64, image::ExtendedColorType::Rgba8)
         .expect("icon encoding");
+    let major = std::env::var("CARGO_PKG_VERSION_MAJOR").expect("major version");
+    let minor = std::env::var("CARGO_PKG_VERSION_MINOR").expect("minor version");
+    let patch = std::env::var("CARGO_PKG_VERSION_PATCH").expect("patch version");
     let resource = format!(
         r#"
 1 ICON "{}"
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION {major},{minor},{patch},0
+PRODUCTVERSION {major},{minor},{patch},0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -36,8 +42,8 @@ BEGIN
   BEGIN
    VALUE "FileDescription", "Lamar Pet\0"
    VALUE "ProductName", "Lamar Pet\0"
-   VALUE "ProductVersion", "0.1.0\0"
-   VALUE "FileVersion", "0.1.0.0\0"
+   VALUE "ProductVersion", "{major}.{minor}.{patch}\0"
+   VALUE "FileVersion", "{major}.{minor}.{patch}.0\0"
    VALUE "InternalName", "lamar-pet\0"
    VALUE "CompanyName", "lamar\0"
    VALUE "OriginalFilename", "lamar-pet.exe\0"
