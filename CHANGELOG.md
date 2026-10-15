@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-- Free pet positioning with corner anchoring only on layout changes and off-screen recovery.
-- Panel stays above the pet while open; the pet regains topmost after it closes.
-- Deferred native window moves so dragging across monitors no longer crashes.
+- Free pet positioning with top-left anchoring on layout changes and off-screen recovery, so expanding or collapsing the note no longer shifts the sprite.
+- Pet stays topmost over all apps; the panel joins the same band while open and the non-activatable pet can never rise over it.
+- Native window moves and resizes run on a dedicated thread so dragging across monitors no longer crashes; layout corrections use live-measured DPI and frame borders, fixing clipped content after crossing.
 - Reminder windows show the pet with entrance and idle motion, plus a bundled chime.
 - New "reminder sound" preference toggle, persisted with backward-compatible defaults.
 - Focus rounds linked to a task check it off when they finish naturally.

@@ -687,7 +687,7 @@ impl MainView {
     fn focus_card(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let focus = self.snapshot.focus.clone();
         let idle = focus.phase == FocusPhase::Idle;
-        let blocked = self.snapshot.load_pending || self.pending.is_some();
+        let blocked = self.snapshot.load_pending;
         let surface = if cx.theme().is_dark() {
             cx.theme().popover
         } else {
@@ -797,7 +797,7 @@ impl MainView {
     }
     #[inline(never)]
     fn task_composer(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let blocked = self.snapshot.load_pending || self.pending.is_some();
+        let blocked = self.snapshot.load_pending;
         let surface = if cx.theme().is_dark() {
             cx.theme().popover
         } else {
@@ -897,7 +897,7 @@ impl MainView {
         selected_id: Option<u64>,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let blocked = self.snapshot.load_pending || self.pending.is_some();
+        let blocked = self.snapshot.load_pending;
         let surface = cx.theme().popover;
         let muted = cx.theme().muted;
         let muted_fg = cx.theme().muted_foreground;
@@ -1184,7 +1184,7 @@ impl MainView {
     fn settings_page(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let focus = self.snapshot.focus.clone();
         let idle = focus.phase == FocusPhase::Idle;
-        let blocked = self.snapshot.load_pending || self.pending.is_some();
+        let blocked = self.snapshot.load_pending;
         let surface = if cx.theme().is_dark() {
             cx.theme().popover
         } else {

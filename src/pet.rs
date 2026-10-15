@@ -20,18 +20,62 @@ use std::{
 };
 
 /// gpui's `Window::start_window_move` is a no-op on Windows, so the pet
-/// drags itself: remember where the cursor grabbed the window, then apply
-/// `SetWindowPos` while the button stays down.
+/// drags itself. Dragging is tracked entirely in physical pixels — cursor
+/// offset inside the window rect — because gpui's logical coordinate space
+/// can go stale across `WM_DPICHANGED` (its stored scale factor may not
+/// match the monitor the window is actually on), which would silently
+/// misplace every move.
 #[cfg(windows)]
-fn cursor_position(window: &Window) -> Option<(f32, f32)> {
+fn cursor_position() -> Option<(i32, i32)> {
     use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
     let mut cursor = POINT::default();
     // SAFETY: the point buffer is valid for the duration of this call.
     unsafe { GetCursorPos(&mut cursor) }.ok()?;
-    let scale = f64::from(window.scale_factor());
+    Some((cursor.x, cursor.y))
+}
+
+#[cfg(windows)]
+fn window_rect(hwnd: windows::Win32::Foundation::HWND) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::{Foundation::RECT, UI::WindowsAndMessaging::GetWindowRect};
+    let mut rect = RECT::default();
+    // SAFETY: rect is a valid out buffer; hwnd belongs to this process.
+    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
     Some((
-        (f64::from(cursor.x) / scale) as f32,
-        (f64::from(cursor.y) / scale) as f32,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+    ))
+}
+
+/// Effective physical/logical metrics for the window, measured live instead
+/// of trusting `window.scale_factor()` (stale after `WM_DPICHANGED`) or
+/// `bounds()` (client area only — the outer frame is larger by the border).
+/// Returns (eff_x, eff_y, border_w, border_h): multiply logical deltas by
+/// eff for physical pixels; add border for client->window sizes.
+#[cfg(windows)]
+fn frame_metrics(
+    hwnd: windows::Win32::Foundation::HWND,
+    window: &Window,
+) -> Option<(f32, f32, f32, f32)> {
+    use windows::Win32::{Foundation::RECT, UI::WindowsAndMessaging::GetClientRect};
+    let (_, _, win_w, win_h) = window_rect(hwnd)?;
+    let mut client = RECT::default();
+    // SAFETY: client is a valid out buffer; hwnd belongs to this process.
+    unsafe { GetClientRect(hwnd, &mut client) }.ok()?;
+    let client_w = (client.right - client.left) as f32;
+    let client_h = (client.bottom - client.top) as f32;
+    let bounds = window.bounds();
+    let logical_w = f32::from(bounds.size.width);
+    let logical_h = f32::from(bounds.size.height);
+    if client_w <= 0.0 || client_h <= 0.0 || logical_w <= 0.0 || logical_h <= 0.0 {
+        return None;
+    }
+    Some((
+        client_w / logical_w,
+        client_h / logical_h,
+        win_w as f32 - client_w,
+        win_h as f32 - client_h,
     ))
 }
 
@@ -64,11 +108,36 @@ fn clear_window_shadow(window: &Window) {
     }
 }
 
-/// The pet popup is created with WS_EX_TOPMOST so it floats over regular app
-/// windows. While the control panel is open, though, a topmost pet covering it
-/// would still receive every click through its transparent pixels, which makes
-/// panel inputs unreachable. Dropping the flag while the panel is alive keeps
-/// the panel interactive; it is restored once the panel closes.
+/// The pet keeps WS_EX_NOACTIVATE so grabbing it can never raise it above the
+/// control panel: while the panel exists it is itself topmost, and a window
+/// that cannot be activated stays below it in the topmost band. That lets the
+/// pet float over every normal app window without ever eating panel clicks
+/// through its transparent pixels.
+#[cfg(windows)]
+fn disable_activation(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
+        },
+    };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(raw.hwnd.get() as *mut core::ffi::c_void);
+    // SAFETY: hwnd is this window's own handle; only the ex-style bit changes.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
+    }
+}
+
+/// `set_topmost` toggles the WS_EX_TOPMOST band, used to float the control
+/// panel above the pet while it is open.
 #[cfg(windows)]
 pub(crate) fn set_topmost(window: &Window, on_top: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -121,13 +190,14 @@ mod native_move {
         },
     };
 
-    /// One full geometry request; `size: None` keeps the current size.
+    /// One full geometry request in physical pixels, already resolved on the
+    /// UI thread where gpui's coordinate state is available; `size: None`
+    /// keeps the current size.
     pub struct Request {
         pub hwnd: usize,
-        pub x: f32,
-        pub y: f32,
-        pub size: Option<(f32, f32)>,
-        pub scale: f32,
+        pub x: i32,
+        pub y: i32,
+        pub size: Option<(i32, i32)>,
     }
 
     pub struct WindowMover(Sender<Request>);
@@ -154,10 +224,10 @@ mod native_move {
                         let _ = SetWindowPos(
                             HWND(request.hwnd as *mut core::ffi::c_void),
                             None,
-                            (request.x * request.scale) as i32,
-                            (request.y * request.scale) as i32,
-                            (width * request.scale) as i32,
-                            (height * request.scale) as i32,
+                            request.x,
+                            request.y,
+                            width,
+                            height,
                             flags,
                         );
                     }
@@ -173,7 +243,7 @@ mod native_move {
 }
 
 #[cfg(windows)]
-fn hwnd_bits(window: &Window) -> Option<usize> {
+fn native_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     // `Window::window_handle` is an inherent gpui method; disambiguate to the
     // raw-window-handle trait to reach the OS-level HWND.
@@ -183,7 +253,14 @@ fn hwnd_bits(window: &Window) -> Option<usize> {
     let RawWindowHandle::Win32(raw) = handle.as_raw() else {
         return None;
     };
-    Some(raw.hwnd.get() as usize)
+    Some(windows::Win32::Foundation::HWND(
+        raw.hwnd.get() as *mut core::ffi::c_void
+    ))
+}
+
+#[cfg(windows)]
+fn hwnd_bits(window: &Window) -> Option<usize> {
+    native_hwnd(window).map(|hwnd| hwnd.0 as usize)
 }
 
 pub struct PetView {
@@ -197,11 +274,11 @@ pub struct PetView {
     last_activity: u64,
     last_reminder: Option<u64>,
     last_mouse: Option<(i32, i32)>,
-    drag_grab: Option<(f32, f32)>,
+    drag_grab: Option<(i32, i32)>,
     drag_moved: bool,
-    shadow_cleared: bool,
+    native_tweaks_done: bool,
     last_name: String,
-    last_layout: Option<(u16, bool, bool)>,
+    last_layout: Option<(u16, bool, bool, u32)>,
     direction: i32,
     frame: usize,
     compact: bool,
@@ -253,7 +330,7 @@ impl PetView {
             last_mouse: None,
             drag_grab: None,
             drag_moved: false,
-            shadow_cleared: false,
+            native_tweaks_done: false,
             last_name,
             last_layout: None,
             direction: 0,
@@ -378,18 +455,16 @@ impl PetView {
     #[cfg(windows)]
     fn follow_drag(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if let Some((grab_x, grab_y)) = self.drag_grab
-            && let Some((x, y)) = cursor_position(window)
+            && let Some((x, y)) = cursor_position()
+            && let Some(hwnd) = hwnd_bits(window)
         {
             self.drag_moved = true;
-            if let Some(hwnd) = hwnd_bits(window) {
-                self.mover.enqueue(native_move::Request {
-                    hwnd,
-                    x: x - grab_x,
-                    y: y - grab_y,
-                    size: None,
-                    scale: window.scale_factor(),
-                });
-            }
+            self.mover.enqueue(native_move::Request {
+                hwnd,
+                x: x - grab_x,
+                y: y - grab_y,
+                size: None,
+            });
         }
     }
 
@@ -402,10 +477,13 @@ impl Render for PetView {
         self.metrics
             .pet_frames
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if !self.shadow_cleared {
-            self.shadow_cleared = true;
+        if !self.native_tweaks_done {
+            self.native_tweaks_done = true;
             #[cfg(windows)]
-            clear_window_shadow(window);
+            {
+                clear_window_shadow(window);
+                disable_activation(window);
+            }
         }
         let snapshot = self.client.snapshot();
         crate::ui::sync_theme(snapshot.preferences.appearance, window, cx);
@@ -418,25 +496,40 @@ impl Render for PetView {
             snapshot.preferences.show_todos,
             self.compact,
         );
-        // Reposition only when the layout signature actually changes, or when
-        // the window has drifted entirely off the visible display. Checking the
-        // reported size every frame drifts the window toward a corner when the
-        // reported bounds ever disagree with the layout we last applied.
+        // The signature carries the display scale so a drag onto a monitor
+        // with a different DPI re-applies the layout once, and a persistent
+        // size mismatch (e.g. a stale WM_DPICHANGED suggestion) is corrected
+        // the same way. Corrections anchor the top-left corner — the sprite
+        // stays put and the note grows or shrinks beneath it — instead of
+        // bottom-right anchoring, which visibly shifts the cat on every
+        // expand/collapse toggle.
         let signature = (
             snapshot.preferences.scale_percent,
             snapshot.preferences.show_todos,
             self.compact,
+            (window.scale_factor() * 256.0) as u32,
         );
-        if self.last_layout.replace(signature) != Some(signature) {
-            #[cfg(windows)]
-            {
-                let bounds = window.bounds();
-                let mut x =
-                    f32::from(bounds.origin.x) + f32::from(bounds.size.width) - layout.width;
-                let mut y =
-                    f32::from(bounds.origin.y) + f32::from(bounds.size.height) - layout.height;
-                if let Some(display) = window.display(cx) {
-                    let d = display.bounds();
+        let signature_changed = self.last_layout.replace(signature) != Some(signature);
+        #[cfg(windows)]
+        {
+            let bounds = window.bounds();
+            let size_off = (f32::from(bounds.size.width) - layout.width).abs() > 2.0
+                || (f32::from(bounds.size.height) - layout.height).abs() > 2.0;
+            let display = window.display(cx);
+            let d = display.map(|display| display.bounds());
+            let visible = d.is_some_and(|d| {
+                let b = bounds;
+                let margin = 16.0_f32;
+                f32::from(b.origin.x) < f32::from(d.origin.x + d.size.width) - margin
+                    && f32::from(b.origin.x + b.size.width) > f32::from(d.origin.x) + margin
+                    && f32::from(b.origin.y) < f32::from(d.origin.y + d.size.height) - margin
+                    && f32::from(b.origin.y + b.size.height) > f32::from(d.origin.y) + margin
+            });
+            let mut logical_target: Option<(f32, f32)> = None;
+            if visible && (signature_changed || size_off) {
+                let mut x = f32::from(bounds.origin.x);
+                let mut y = f32::from(bounds.origin.y);
+                if let Some(d) = d {
                     let min_x = f32::from(d.origin.x) + 8.0;
                     let min_y = f32::from(d.origin.y) + 8.0;
                     x = x.clamp(
@@ -448,40 +541,54 @@ impl Render for PetView {
                         (f32::from(d.origin.y + d.size.height) - layout.height - 54.0).max(min_y),
                     );
                 }
+                logical_target = Some((x, y));
+            }
+            if (!visible || logical_target.is_some())
+                && let Some(hwnd) = native_hwnd(window)
+                && let Some((eff_x, eff_y, border_w, border_h)) = frame_metrics(hwnd, window)
+                && let Some((win_x, win_y, win_w, win_h)) = window_rect(hwnd)
+            {
+                let size = Some((
+                    (layout.width * eff_x + border_w) as i32,
+                    (layout.height * eff_y + border_h) as i32,
+                ));
                 // Same re-entrancy constraint as follow_drag: resize/move go
                 // through SetWindowPos, so both run on the mover thread.
-                if let Some(hwnd) = hwnd_bits(window) {
+                if !visible {
+                    // Off-screen recovery: compute the home spot from the
+                    // monitor's physical work area — gpui's logical space may
+                    // not match this display's scale right now.
+                    use windows::Win32::Graphics::Gdi::{
+                        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+                    };
+                    let mut info = MONITORINFO {
+                        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                        ..Default::default()
+                    };
+                    // SAFETY: info is a correctly sized out buffer.
+                    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+                    if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+                        let area = info.rcWork;
+                        self.mover.enqueue(native_move::Request {
+                            hwnd: hwnd.0 as usize,
+                            x: area.right - win_w - (30.0 * eff_x) as i32,
+                            y: area.bottom - win_h - (70.0 * eff_y) as i32,
+                            size,
+                        });
+                    }
+                } else if let Some((x, y)) = logical_target {
                     self.mover.enqueue(native_move::Request {
-                        hwnd,
-                        x,
-                        y,
-                        size: Some((layout.width, layout.height)),
-                        scale: window.scale_factor(),
+                        hwnd: hwnd.0 as usize,
+                        x: win_x + ((x - f32::from(bounds.origin.x)) * eff_x) as i32,
+                        y: win_y + ((y - f32::from(bounds.origin.y)) * eff_y) as i32,
+                        size,
                     });
                 }
             }
-            #[cfg(not(windows))]
+        }
+        #[cfg(not(windows))]
+        if signature_changed {
             window.resize(gpui_kit::size(px(layout.width), px(layout.height)));
-        } else {
-            #[cfg(windows)]
-            if let Some(display) = window.display(cx) {
-                let d = display.bounds();
-                let b = window.bounds();
-                let margin = 16.0_f32;
-                let visible = f32::from(b.origin.x) < f32::from(d.origin.x + d.size.width) - margin
-                    && f32::from(b.origin.x + b.size.width) > f32::from(d.origin.x) + margin
-                    && f32::from(b.origin.y) < f32::from(d.origin.y + d.size.height) - margin
-                    && f32::from(b.origin.y + b.size.height) > f32::from(d.origin.y) + margin;
-                if !visible && let Some(hwnd) = hwnd_bits(window) {
-                    self.mover.enqueue(native_move::Request {
-                        hwnd,
-                        x: f32::from(d.origin.x + d.size.width) - layout.width - 30.0,
-                        y: f32::from(d.origin.y + d.size.height) - layout.height - 70.0,
-                        size: None,
-                        scale: window.scale_factor(),
-                    });
-                }
-            }
         }
         let side = layout.pet_side;
         let label = match snapshot.focus.phase {
@@ -533,10 +640,10 @@ impl Render for PetView {
                             view.drag_moved = false;
                             #[cfg(windows)]
                             {
-                                view.drag_grab = cursor_position(window).map(|(x, y)| {
-                                    let origin = window.bounds().origin;
-                                    (x - f32::from(origin.x), y - f32::from(origin.y))
-                                });
+                                view.drag_grab = native_hwnd(window)
+                                    .and_then(window_rect)
+                                    .zip(cursor_position())
+                                    .map(|((wx, wy, _, _), (cx, cy))| (cx - wx, cy - wy));
                             }
                             #[cfg(not(windows))]
                             window.start_window_move();
@@ -579,7 +686,10 @@ impl Render for PetView {
         } else {
             gpui_kit::rgb(0xf0f4e9).into()
         };
-        let blocked = snapshot.load_pending || self.pending.is_some();
+        // Commands that arrive while one is in flight are dropped by `send`
+        // anyway; disabling every button for the ~50ms ack window just makes
+        // the whole note flash grey on each click.
+        let blocked = snapshot.load_pending;
         let mut card = div()
             .id("desktop-work-note")
             .w(px(layout.width - 16.0))

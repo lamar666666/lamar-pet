@@ -160,7 +160,7 @@ fn run() -> Result<(), String> {
                 let mut last_phase: Option<FocusPhase> = None;
                 let mut last_standup: Option<u64> = None;
                 let mut resumed = false;
-                let mut pet_topmost: Option<bool> = None;
+                let mut panel_topmost_set = false;
                 loop {
                     executor.timer(Duration::from_millis(100)).await;
                     if !cx.update(|cx| cx.has_global::<Owner>()) {
@@ -172,26 +172,27 @@ fn run() -> Result<(), String> {
                         resumed = true;
                     }
                     cx.update(|cx| {
-                        let (panel, pet) = {
-                            let owner = cx.global::<Owner>();
-                            (owner.panel, owner.pet)
-                        };
+                        let panel = cx.global::<Owner>().panel;
                         let panel_alive =
                             panel.is_some_and(|handle| handle.update(cx, |_, _, _| ()).is_ok());
-                        if !panel_alive {
+                        if panel_alive {
+                            // The pet is permanently topmost, so the panel
+                            // joins the same band once to stay above it. The
+                            // pet is non-activatable and can never rise back
+                            // over the panel, while still floating above all
+                            // normal app windows.
+                            if !panel_topmost_set && let Some(panel) = panel {
+                                let _ = panel.update(cx, |_, window, _| {
+                                    crate::pet::set_topmost(window, true)
+                                });
+                                panel_topmost_set = true;
+                            }
+                        } else {
                             let owner = cx.global_mut::<Owner>();
                             owner.panel = None;
                             owner.panel_view = None;
+                            panel_topmost_set = false;
                         }
-                        let want_topmost = !panel_alive;
-                        if pet_topmost != Some(want_topmost)
-                            && let Some(pet) = pet
-                        {
-                            let _ = pet.update(cx, |_, window, _| {
-                                crate::pet::set_topmost(window, want_topmost)
-                            });
-                        }
-                        pet_topmost = Some(want_topmost);
                     });
                     let actions = cx.update(|cx| {
                         let owner = cx.global::<Owner>();
