@@ -5,7 +5,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Animation, AnimationExt, App, Context, CursorStyle, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Render, Window, div, img, prelude::*, px, size,
+    MouseMoveEvent, MouseUpEvent, Render, Window, div, img, prelude::*, px,
 };
 use lamar_pet::{
     focus::{FocusCommand, FocusPhase},
@@ -103,36 +103,87 @@ pub(crate) fn set_topmost(window: &Window, on_top: bool) {
 #[cfg(not(windows))]
 pub(crate) fn set_topmost(_window: &Window, _on_top: bool) {}
 
+/// Window geometry requests applied on a dedicated thread. Calling
+/// `SetWindowPos` from a gpui callback synchronously re-enters the window
+/// procedure, and when a move crosses a monitor boundary `WM_MOVE` fires
+/// `display_changed` while `&mut App` is still borrowed — the nested update
+/// aborts the process. A call issued from another thread is queued onto the
+/// owning thread's message pump instead, so the window procedure runs only
+/// after the borrow is released.
 #[cfg(windows)]
-fn move_window(window: &Window, x: f32, y: f32) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+mod native_move {
+    use std::sync::mpsc::{Sender, channel};
+    use std::thread;
     use windows::Win32::{
         Foundation::HWND,
-        UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos},
+        UI::WindowsAndMessaging::{
+            SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        },
     };
+
+    /// One full geometry request; `size: None` keeps the current size.
+    pub struct Request {
+        pub hwnd: usize,
+        pub x: f32,
+        pub y: f32,
+        pub size: Option<(f32, f32)>,
+        pub scale: f32,
+    }
+
+    pub struct WindowMover(Sender<Request>);
+
+    impl WindowMover {
+        pub fn spawn() -> Self {
+            let (sender, receiver) = channel::<Request>();
+            thread::spawn(move || {
+                while let Ok(mut request) = receiver.recv() {
+                    // Drags emit a burst of positions; only the newest matters.
+                    while let Ok(newer) = receiver.try_recv() {
+                        request = newer;
+                    }
+                    let flags = if request.size.is_some() {
+                        SET_WINDOW_POS_FLAGS(0)
+                    } else {
+                        SWP_NOSIZE
+                    } | SWP_NOACTIVATE
+                        | SWP_NOZORDER;
+                    let (width, height) = request.size.unwrap_or_default();
+                    // SAFETY: hwnd was captured from this process's own live
+                    // window; the thread only repositions or resizes it.
+                    unsafe {
+                        let _ = SetWindowPos(
+                            HWND(request.hwnd as *mut core::ffi::c_void),
+                            None,
+                            (request.x * request.scale) as i32,
+                            (request.y * request.scale) as i32,
+                            (width * request.scale) as i32,
+                            (height * request.scale) as i32,
+                            flags,
+                        );
+                    }
+                }
+            });
+            Self(sender)
+        }
+
+        pub fn enqueue(&self, request: Request) {
+            let _ = self.0.send(request);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn hwnd_bits(window: &Window) -> Option<usize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     // `Window::window_handle` is an inherent gpui method; disambiguate to the
     // raw-window-handle trait to reach the OS-level HWND.
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
+        return None;
     };
     let RawWindowHandle::Win32(raw) = handle.as_raw() else {
-        return;
+        return None;
     };
-    let hwnd = HWND(raw.hwnd.get() as *mut core::ffi::c_void);
-    let scale = window.scale_factor();
-    // SAFETY: hwnd comes from this process's own live window; the call only
-    // repositions it without touching size, z-order or activation.
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            (x * scale) as i32,
-            (y * scale) as i32,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-    }
+    Some(raw.hwnd.get() as usize)
 }
 
 pub struct PetView {
@@ -159,6 +210,8 @@ pub struct PetView {
     send_error: bool,
     feedback: FeedbackTracker,
     layout_generation: u64,
+    #[cfg(windows)]
+    mover: native_move::WindowMover,
 }
 
 impl PetView {
@@ -211,6 +264,8 @@ impl PetView {
             send_error: false,
             feedback: FeedbackTracker::default(),
             layout_generation: 0,
+            #[cfg(windows)]
+            mover: native_move::WindowMover::spawn(),
         }
     }
 
@@ -321,17 +376,20 @@ impl PetView {
     }
 
     #[cfg(windows)]
-    fn follow_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn follow_drag(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if let Some((grab_x, grab_y)) = self.drag_grab
             && let Some((x, y)) = cursor_position(window)
         {
             self.drag_moved = true;
-            // SetWindowPos re-enters GPUI synchronously via WM_MOVE; across a
-            // monitor boundary it also fires display_changed callbacks. Doing
-            // that inside the mouse listener would re-borrow &mut App and
-            // panic, so the actual move runs after event dispatch completes.
-            let target = (x - grab_x, y - grab_y);
-            window.defer(cx, move |window, _| move_window(window, target.0, target.1));
+            if let Some(hwnd) = hwnd_bits(window) {
+                self.mover.enqueue(native_move::Request {
+                    hwnd,
+                    x: x - grab_x,
+                    y: y - grab_y,
+                    size: None,
+                    scale: window.scale_factor(),
+                });
+            }
         }
     }
 
@@ -370,7 +428,6 @@ impl Render for PetView {
             self.compact,
         );
         if self.last_layout.replace(signature) != Some(signature) {
-            let target_size = size(px(layout.width), px(layout.height));
             #[cfg(windows)]
             {
                 let bounds = window.bounds();
@@ -392,15 +449,19 @@ impl Render for PetView {
                     );
                 }
                 // Same re-entrancy constraint as follow_drag: resize/move go
-                // through SetWindowPos, which synchronously pumps WM_SIZE and
-                // WM_MOVE back into GPUI while render holds &mut App.
-                window.defer(cx, move |window, _| {
-                    window.resize(target_size);
-                    move_window(window, x, y);
-                });
+                // through SetWindowPos, so both run on the mover thread.
+                if let Some(hwnd) = hwnd_bits(window) {
+                    self.mover.enqueue(native_move::Request {
+                        hwnd,
+                        x,
+                        y,
+                        size: Some((layout.width, layout.height)),
+                        scale: window.scale_factor(),
+                    });
+                }
             }
             #[cfg(not(windows))]
-            window.resize(target_size);
+            window.resize(gpui_kit::size(px(layout.width), px(layout.height)));
         } else {
             #[cfg(windows)]
             if let Some(display) = window.display(cx) {
@@ -411,12 +472,14 @@ impl Render for PetView {
                     && f32::from(b.origin.x + b.size.width) > f32::from(d.origin.x) + margin
                     && f32::from(b.origin.y) < f32::from(d.origin.y + d.size.height) - margin
                     && f32::from(b.origin.y + b.size.height) > f32::from(d.origin.y) + margin;
-                if !visible {
-                    let target = (
-                        f32::from(d.origin.x + d.size.width) - layout.width - 30.0,
-                        f32::from(d.origin.y + d.size.height) - layout.height - 70.0,
-                    );
-                    window.defer(cx, move |window, _| move_window(window, target.0, target.1));
+                if !visible && let Some(hwnd) = hwnd_bits(window) {
+                    self.mover.enqueue(native_move::Request {
+                        hwnd,
+                        x: f32::from(d.origin.x + d.size.width) - layout.width - 30.0,
+                        y: f32::from(d.origin.y + d.size.height) - layout.height - 70.0,
+                        size: None,
+                        scale: window.scale_factor(),
+                    });
                 }
             }
         }
