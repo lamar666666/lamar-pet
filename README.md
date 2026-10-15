@@ -34,13 +34,17 @@
 
 ## 下载
 
-[下载 Windows x64 EXE](https://github.com/lamar666666/lamar-pet/releases/latest/download/lamar-pet.exe)，双击即可运行。
+- [Windows x64 EXE](https://github.com/lamar666666/lamar-pet/releases/latest/download/lamar-pet.exe)，双击即可运行。
+- [macOS Apple Silicon（M 系列）](https://github.com/lamar666666/lamar-pet/releases/latest/download/lamar-pet-macos-arm64.zip)，解压得到 `LamarPet.app`。
+- [macOS Intel](https://github.com/lamar666666/lamar-pet/releases/latest/download/lamar-pet-macos-x64.zip)，同上。
+
+macOS 包未做公证签名，首次打开如提示"无法验证开发者"或"已损坏"，在解压目录执行 `xattr -dr com.apple.quarantine LamarPet.app` 后即可运行。
 
 ## 运行与构建
 
-当前支持 Windows x64。源码使用 Rust 1.97.1 和 GPUI Kit。
+当前支持 Windows x64 与 macOS（12+，Apple Silicon / Intel）。源码使用 Rust 1.97.1 和 GPUI Kit。
 
-构建需要 Rust、Visual Studio Build Tools 的 C++ 桌面开发组件及 Windows SDK。
+Windows 构建需要 Rust、Visual Studio Build Tools 的 C++ 桌面开发组件及 Windows SDK；macOS 构建需要 Rust 和 Xcode Command Line Tools。
 
 ```powershell
 cargo run --locked
